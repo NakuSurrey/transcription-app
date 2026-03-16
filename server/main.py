@@ -1,6 +1,6 @@
 # server/main.py — FastAPI Server Entry Point
 # Phase 2: The Brain (skeleton first, models added next)
-
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, UploadFile, File
 from fastapi.responses import JSONResponse
 import uvicorn
@@ -9,7 +9,7 @@ from models.transcriber import TranscriptionRouter
 # ============================================
 # CREATE THE APP
 # ============================================
-app = FastAPI(title="Transcription Server")
+# app = FastAPI(title="Transcription Server")
 
 # ============================================
 # LOAD AI MODELS AT STARTUP
@@ -22,11 +22,20 @@ app = FastAPI(title="Transcription Server")
 router = TranscriptionRouter()
 
 
-@app.on_event("startup")
-async def startup_event():
-    """Called automatically when FastAPI server starts."""
-    router.load_models()
+# @app.on_event("startup")
+# async def startup_event():
+#     """Called automatically when FastAPI server starts."""
+#     router.load_models()
 
+@asynccontextmanager
+async def lifespan(app):
+    # --- STARTUP: runs when server boots ---
+    router.load_models()
+    yield
+    # --- SHUTDOWN: runs when server stops ---
+    print("[SERVER] Shutting down, cleaning up resources")
+
+app = FastAPI(title="Transcription Server", lifespan=lifespan)
 
 # ============================================
 # DOOR 1: WebSocket Endpoint — Live Mode
