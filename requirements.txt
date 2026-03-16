@@ -1,0 +1,13 @@
+# === SERVER DEPENDENCIES (install on Digital Ocean droplet) ===
+fastapi
+uvicorn
+python-multipart
+
+# === CLIENT DEPENDENCIES (install on your Windows laptop) ===
+pyaudiowpatch
+PyQt6
+yt-dlp
+websockets
+aiohttp
+python-dotenv
+numpy
