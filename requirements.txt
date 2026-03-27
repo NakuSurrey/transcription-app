@@ -11,3 +11,4 @@ websockets
 aiohttp
 python-dotenv
 numpy
+requests

@@ -1,5 +1,6 @@
 # client/network/connection_manager.py — Server Connection Mode Manager
 # Step 4b: Handles the difference between HPC and DigitalOcean infrastructure
+# Step 5c: Periodic health monitoring — detects dropped connections proactively
 #
 # This module reads SERVER_MODE from .env and provides a unified interface
 # for the UI to check server status without needing to know which
@@ -11,10 +12,17 @@
 #   "digitalocean" → Server managed by app via DigitalOcean API
 #                    App can start/stop the droplet
 #
+# HEALTH MONITOR:
+#   Pings /health every 30 seconds while active.
+#   Detects dropped SSH tunnels or crashed servers before the user notices.
+#   Calls back to the UI with "healthy" or "unhealthy" status.
+#
 # RUNS ON: Your Windows laptop (client-side)
-# USED BY: overlay.py (UI server status button)
+# USED BY: overlay.py (UI server status button), workers.py (health monitoring)
 
 import os
+import asyncio
+import threading
 import aiohttp
 from dotenv import load_dotenv
 
@@ -210,3 +218,106 @@ class ConnectionManager:
                 return {"success": False, "message": "Failed to stop droplet"}
 
         return {"success": False, "message": "CloudController not initialized"}
+
+    # ============================================
+    # HEALTH MONITOR — Periodic Background Checks
+    # ============================================
+    # Runs in its own thread. Pings /health every `interval` seconds.
+    # Calls `health_callback` with True (healthy) or False (unhealthy)
+    # whenever the state CHANGES. Does not call on every ping — only
+    # on transitions (healthy→unhealthy or unhealthy→healthy).
+    #
+    # WHY only on transitions?
+    #   If we called the callback every 30 seconds with "still healthy",
+    #   the UI would be flooded with redundant updates. The UI only needs
+    #   to know when something CHANGED so it can update the display.
+
+    def start_health_monitor(self, health_callback, interval=30):
+        """
+        Start periodic health checks in the background.
+
+        Args:
+            health_callback: function(is_healthy: bool, message: str)
+                Called ONLY when health state changes (healthy→unhealthy or vice versa).
+            interval: seconds between health checks (default: 30)
+
+        How it works:
+            1. Spawns a background thread with its own asyncio event loop
+            2. Every `interval` seconds, pings /health
+            3. Tracks last known state
+            4. If the state changed since last check, calls health_callback
+            5. Runs until stop_health_monitor() is called
+        """
+        # Store callback and config
+        self._health_callback = health_callback
+        self._health_interval = interval
+        self._health_running = True
+        self._last_health_state = None  # None = unknown (first check always triggers callback)
+
+        # Start monitor in its own thread
+        self._health_thread = threading.Thread(
+            target=self._run_health_loop,
+            daemon=True  # daemon = thread dies when main app exits
+        )
+        self._health_thread.start()
+        print(f"[HEALTH] Monitor started (checking every {interval}s)")
+
+    def stop_health_monitor(self):
+        """
+        Stop the periodic health checks.
+        Called when live mode is stopped or app is closing.
+        """
+        self._health_running = False
+        if hasattr(self, '_health_thread') and self._health_thread:
+            self._health_thread.join(timeout=3)
+            self._health_thread = None
+        print("[HEALTH] Monitor stopped")
+
+    def _run_health_loop(self):
+        """
+        The background thread's main function.
+        Creates an asyncio loop and runs the async health check loop.
+        Same pattern as LiveWorker and BulkWorker — separate thread,
+        separate event loop, communicates back via callback.
+        """
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+        try:
+            loop.run_until_complete(self._async_health_loop())
+        except Exception as e:
+            print(f"[HEALTH] Monitor error: {e}")
+        finally:
+            loop.close()
+
+    async def _async_health_loop(self):
+        """
+        The async health check loop.
+        Runs every `interval` seconds until _health_running is False.
+        """
+        while self._health_running:
+            # Ping the server
+            is_healthy = await self.is_server_available()
+
+            # Only notify on state CHANGE (or first check)
+            if is_healthy != self._last_health_state:
+                self._last_health_state = is_healthy
+
+                if is_healthy:
+                    message = self.get_status_message(True)
+                    print(f"[HEALTH] Server is reachable")
+                else:
+                    message = self.get_status_message(False)
+                    print(f"[HEALTH] Server is NOT reachable")
+
+                # Notify the UI via callback
+                if self._health_callback:
+                    self._health_callback(is_healthy, message)
+
+            # Wait before next check
+            # Using a short-sleep loop instead of one long sleep
+            # so we can exit quickly when stop_health_monitor() is called
+            for _ in range(self._health_interval):
+                if not self._health_running:
+                    return
+                await asyncio.sleep(1)  # Check _health_running every second

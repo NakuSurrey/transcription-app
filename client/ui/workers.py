@@ -23,6 +23,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from audio.capture import AudioCapturer
 from audio.youtube import YouTubeExtractor
 from network.transmitter import LiveTransmitter, BulkTransmitter
+from network.connection_manager import ConnectionManager
 
 
 # ============================================
@@ -37,19 +38,61 @@ class LiveWorker:
     """
     Manages the live transcription pipeline.
     Runs capture + streaming in background, emits signals to UI.
+
+    Phase 5 additions:
+        - Passes status_callback to LiveTransmitter for reconnection updates
+        - Starts/stops health monitor with the pipeline lifecycle
+        - Accepts a ConnectionManager reference for health monitoring
     """
 
-    def __init__(self, signals):
+    def __init__(self, signals, connection_manager=None):
         """
         Args:
             signals: AsyncSignals object from the UI for thread-safe communication
+            connection_manager: ConnectionManager instance for health monitoring.
+                If None, health monitoring is disabled (transmitter still auto-reconnects).
         """
         self.signals = signals
         self.capturer = AudioCapturer()
-        self.transmitter = LiveTransmitter()
+        self.connection_manager = connection_manager
+
+        # Pass a status callback to the transmitter so it can report
+        # reconnection events back to the UI via our signals object
+        self.transmitter = LiveTransmitter(
+            status_callback=self._on_transmitter_status
+        )
+
         self.running = False
         self.thread = None
         self.loop = None
+
+    def _on_transmitter_status(self, status: str, message: str):
+        """
+        Callback that LiveTransmitter calls when connection state changes.
+        Forwards the status to the UI via the connection_event signal.
+
+        This bridges the gap between the transmitter (network layer)
+        and the UI (display layer) without either knowing about the other.
+
+        Args:
+            status: "reconnecting", "reconnected", or "failed"
+            message: human-readable description
+        """
+        self.signals.connection_event.emit(status, message)
+
+    def _on_health_change(self, is_healthy: bool, message: str):
+        """
+        Callback that ConnectionManager's health monitor calls
+        when server reachability changes.
+
+        Args:
+            is_healthy: True if server responded to /health, False if not
+            message: human-readable status from ConnectionManager
+        """
+        if is_healthy:
+            self.signals.connection_event.emit("health_restored", message)
+        else:
+            self.signals.connection_event.emit("health_lost", message)
 
     def start(self):
         """Start the live capture + streaming pipeline."""
@@ -60,9 +103,20 @@ class LiveWorker:
         self.thread = threading.Thread(target=self._run_pipeline, daemon=True)
         self.thread.start()
 
+        # Start health monitoring alongside the pipeline
+        if self.connection_manager:
+            self.connection_manager.start_health_monitor(
+                health_callback=self._on_health_change,
+                interval=30
+            )
+
     def stop(self):
         """Stop the pipeline and clean up."""
         self.running = False
+
+        # Stop health monitoring
+        if self.connection_manager:
+            self.connection_manager.stop_health_monitor()
 
         # Stop the audio capturer
         self.capturer.stop()
@@ -165,14 +219,30 @@ class BulkWorker:
     """
     Manages the bulk transcription pipeline.
     Downloads YouTube audio, uploads to server, emits results to UI.
+
+    Phase 5 additions:
+        - Passes status_callback to BulkTransmitter for retry updates
     """
 
     def __init__(self, signals):
         self.signals = signals
         self.extractor = YouTubeExtractor()
-        self.transmitter = BulkTransmitter()
+
+        # Pass a status callback so BulkTransmitter can report retry
+        # events to the UI via our signals object
+        self.transmitter = BulkTransmitter(
+            status_callback=self._on_transmitter_status
+        )
+
         self.running = False
         self.thread = None
+
+    def _on_transmitter_status(self, status: str, message: str):
+        """
+        Callback that BulkTransmitter calls when retry state changes.
+        Forwards to UI via connection_event signal.
+        """
+        self.signals.connection_event.emit(status, message)
 
     def start(self, url: str):
         """

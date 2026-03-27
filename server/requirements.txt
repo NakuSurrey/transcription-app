@@ -1,0 +1,12 @@
+# Server-side dependencies only
+# Install on Digital Ocean GPU droplet, NOT on your laptop
+
+# Web framework
+fastapi
+uvicorn
+python-multipart
+
+# AI Model Libraries
+nemo_toolkit[asr]
+transformers
+torch

@@ -169,8 +169,16 @@ class AsyncSignals(QObject):
     bulk_complete = pyqtSignal(str)       # full transcript text
     connection_status = pyqtSignal(bool)  # connected True/False
     server_status = pyqtSignal(str)       # "booting", "alive", "offline"
-    error = pyqtSignal(str)               # error message
+    error = pyqtSignal(str)              # error message
     download_progress = pyqtSignal(float, str)  # percent, status
+
+    # --- Phase 5: Production Hardening signals ---
+    # connection_event: carries status updates from transmitter reconnection
+    #   and health monitor. Two arguments:
+    #     status (str): "reconnecting", "reconnected", "failed",
+    #                   "health_lost", "health_restored"
+    #     message (str): human-readable description for the UI
+    connection_event = pyqtSignal(str, str)
 
 
 # ============================================
@@ -198,10 +206,13 @@ class TranscriptionOverlay(QMainWindow):
         self._build_ui()
         self._connect_signals()
 
-        # Initialize the async workers that connect audio → network → UI
-        self.live_worker = LiveWorker(self.signals)
-        self.bulk_worker = BulkWorker(self.signals)
+        # Initialize connection manager first — workers may need it
         self.connection = ConnectionManager()
+
+        # Initialize the async workers that connect audio → network → UI
+        # LiveWorker receives connection_manager for health monitoring
+        self.live_worker = LiveWorker(self.signals, connection_manager=self.connection)
+        self.bulk_worker = BulkWorker(self.signals)
 
     # ------------------------------------------
     # WINDOW SETUP
@@ -407,6 +418,7 @@ class TranscriptionOverlay(QMainWindow):
         self.signals.server_status.connect(self._on_server_status)
         self.signals.error.connect(self._on_error)
         self.signals.download_progress.connect(self._on_download_progress)
+        self.signals.connection_event.connect(self._on_connection_event)
 
     # ------------------------------------------
     # GHOST MODE
@@ -762,6 +774,84 @@ class TranscriptionOverlay(QMainWindow):
             self.server_btn.setEnabled(False)
 
     # ------------------------------------------
+    # CONNECTION EVENT HANDLER (Phase 5)
+    # ------------------------------------------
+    # Receives all connection-related status updates from:
+    #   - LiveTransmitter (reconnection attempts)
+    #   - BulkTransmitter (upload retries)
+    #   - ConnectionManager health monitor (periodic checks)
+    #
+    # Updates the server status label and model label to show
+    # what's happening without requiring user action.
+
+    def _on_connection_event(self, status: str, message: str):
+        """
+        Handle connection state changes from transmitters and health monitor.
+
+        Args:
+            status: one of:
+                "reconnecting"   — WebSocket is trying to reconnect
+                "reconnected"    — WebSocket connection restored
+                "failed"         — reconnection/retry gave up
+                "retrying"       — BulkTransmitter retrying upload
+                "recovered"      — BulkTransmitter retry succeeded
+                "health_lost"    — health monitor detected server is unreachable
+                "health_restored"— health monitor detected server is back
+            message: human-readable description
+        """
+        if status == "reconnecting":
+            # WebSocket is trying to reconnect — show amber/warning state
+            self.server_status_label.setText(f"Server: Reconnecting...")
+            self.server_status_label.setStyleSheet("color: #FFB347;")  # amber
+            self.model_label.setText(message)
+
+        elif status == "reconnected":
+            # Connection restored — show green/healthy state
+            if self.connection.is_hpc_mode():
+                self.server_status_label.setText("Server: HPC Connected")
+            else:
+                self.server_status_label.setText("Server: Online")
+            self.server_status_label.setStyleSheet("color: #77DD77;")  # green
+            self.model_label.setText("Connection restored")
+            # Reset color after 3 seconds
+            QTimer.singleShot(3000, lambda: self.server_status_label.setStyleSheet(""))
+
+        elif status == "failed":
+            # Reconnection or retry completely failed — show red/error state
+            self.server_status_label.setText("Server: Connection Lost")
+            self.server_status_label.setStyleSheet("color: #FF6B6B;")  # red
+            self.model_label.setText(message)
+
+        elif status == "retrying":
+            # BulkTransmitter is retrying an upload
+            self.bulk_status.setText(message)
+            self.bulk_status.setStyleSheet("color: #FFB347;")  # amber
+
+        elif status == "recovered":
+            # BulkTransmitter retry succeeded
+            self.bulk_status.setText(message)
+            self.bulk_status.setStyleSheet("color: #77DD77;")  # green
+            QTimer.singleShot(3000, lambda: self.bulk_status.setStyleSheet(""))
+
+        elif status == "health_lost":
+            # Health monitor detected server went down
+            self.server_status_label.setText("Server: Connection Lost")
+            self.server_status_label.setStyleSheet("color: #FF6B6B;")  # red
+            self.server_btn.setObjectName("server_off")
+            self.server_btn.setStyle(self.server_btn.style())
+
+        elif status == "health_restored":
+            # Health monitor detected server came back
+            if self.connection.is_hpc_mode():
+                self.server_status_label.setText("Server: HPC Connected")
+            else:
+                self.server_status_label.setText("Server: Online")
+            self.server_status_label.setStyleSheet("color: #77DD77;")  # green
+            self.server_btn.setObjectName("server_on")
+            self.server_btn.setStyle(self.server_btn.style())
+            QTimer.singleShot(3000, lambda: self.server_status_label.setStyleSheet(""))
+
+    # ------------------------------------------
     # DRAGGABLE WINDOW (since no title bar)
     # ------------------------------------------
     # Without a title bar, the user can't drag the window.
@@ -793,10 +883,13 @@ class TranscriptionOverlay(QMainWindow):
         SOLUTION: Heartbeat system — server auto-shuts down if no
         ping received for 5 minutes. Belt and suspenders.
         """
-        # Stop live capture if running
+        # Stop live capture if running (also stops health monitor)
         if self.is_live:
             self.live_worker.stop()
             self.is_live = False
+
+        # Stop health monitor explicitly in case live mode was never started
+        self.connection.stop_health_monitor()
 
         # Stop any bulk operation
         self.bulk_worker.stop()

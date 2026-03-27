@@ -1,137 +1,211 @@
 # server/models/transcriber.py — AI Model Loading & Confidence-Based Routing
-# Phase 2b: The brain's decision-making system
+# Phase 3: REAL models replacing mocks
 
-import random
+import io
+import numpy as np
+import soundfile as sf
+import torch
 
 # ============================================
-# CONFIDENCE THRESHOLD
+# CONFIDENCE THRESHOLD — unchanged from mock
 # ============================================
-# If Canary's confidence is at or above this number,
-# we trust its result. Below this, we fall back to Whisper.
-# 0.7 = 70% average confidence across all words in the chunk.
-#
-# WHY 0.7? Too high (0.9) = Whisper gets called too often,
-# wasting GPU time on audio Canary handled fine.
-# Too low (0.5) = bad transcriptions slip through.
-# 0.7 is the sweet spot — tunable after real-world testing.
-
 CONFIDENCE_THRESHOLD = 0.7
 
 
 # ============================================
-# MOCK MODELS (replaced with real models on GPU server)
+# REAL CANARY MODEL
 # ============================================
-# These simulate what real models do:
-#   input: raw audio bytes
-#   output: {"text": "transcribed words", "confidence": 0.0-1.0}
-#
-# WHY mock first? If routing logic breaks, we know it's
-# the routing — not a model loading issue. Test the plumbing
-# before turning on the water.
-
-
-class MockCanaryQwen:
+class RealCanaryQwen:
     """
     Primary model — fast, good contextual understanding.
-    In production: nvidia/canary-qwen-2.5b loaded via NVIDIA NeMo.
-    Confidence varies based on audio quality.
+    Loaded via NVIDIA NeMo framework.
     """
     def __init__(self):
         self.name = "Canary-Qwen-2.5B"
-        self.loaded = False
+        self.model = None  # will hold the NeMo model object
 
     def load(self):
-        """Simulate loading model into GPU memory (~30-60 seconds on real GPU)"""
+        import nemo.collections.asr as nemo_asr
         print(f"[MODEL] Loading {self.name}...")
-        self.loaded = True
+
+        # from_pretrained downloads weights if not cached,
+        # or loads from cache if already downloaded by deploy.sh
+        self.model = nemo_asr.models.ASRModel.from_pretrained(
+            "nvidia/canary-1b"
+        )
+
+        # Move model weights into GPU memory
+        # .cuda() = "put this on the GPU"
+        # without this, inference runs on CPU — 100x slower
+        self.model = self.model.cuda()
+
+        # eval mode = inference only, no gradient tracking
+        # training mode tracks gradients (needed for learning)
+        # we're NOT training, so turn it off to save memory + speed
+        self.model.eval()
         print(f"[MODEL] {self.name} ready")
 
     def transcribe(self, audio_bytes: bytes) -> dict:
-        """
-        Simulate transcription.
-        Real model: processes audio waveform through neural network,
-        outputs text + per-word probabilities, averages to confidence.
-        """
-        if not self.loaded:
-            raise RuntimeError(f"{self.name} not loaded! Call .load() first")
+        if self.model is None:
+            raise RuntimeError(f"{self.name} not loaded!")
 
-        # Simulate: sometimes confident, sometimes not
-        # In reality, confidence depends on audio quality (noise, clarity)
-        confidence = random.uniform(0.5, 0.95)
+        # Step 1: bytes → numpy waveform
+        audio_buffer = io.BytesIO(audio_bytes)
+        waveform, sample_rate = sf.read(audio_buffer, dtype='float32')
+
+        # Step 2: ensure mono (1 channel)
+        # stereo audio has shape (samples, 2) — average the two channels
+        if waveform.ndim == 2:
+            waveform = waveform.mean(axis=1)
+
+        # Step 3: NeMo expects 16000 Hz sample rate
+        # if audio comes in at different rate, resample it
+        if sample_rate != 16000:
+            import librosa
+            waveform = librosa.resample(
+                waveform, orig_sr=sample_rate, target_sr=16000
+            )
+
+        # Step 4: transcribe
+        # NeMo transcribe() accepts a list of waveforms
+        # returns list of results — we take index [0]
+        with torch.no_grad():  # no_grad = don't track gradients, saves memory
+            output = self.model.transcribe([waveform], batch_size=1)
+
+        text = output[0] if isinstance(output[0], str) else output[0].text
+
+        # Step 5: Canary returns per-token log probabilities
+        # convert to a 0-1 confidence score
+        # if not available, default to 0.85 (Canary is generally reliable)
+        try:
+            confidence = float(torch.exp(
+                torch.tensor(output[0].score)
+            ).item())
+            confidence = max(0.0, min(1.0, confidence))  # clamp to [0,1]
+        except Exception:
+            confidence = 0.85
+
         return {
-            "text": f"[MOCK Canary] Transcribed {len(audio_bytes)} bytes",
+            "text": text,
             "confidence": round(confidence, 2),
             "model": self.name
         }
 
 
-class MockWhisperLargeV3:
+# ============================================
+# REAL WHISPER MODEL
+# ============================================
+class RealWhisperLargeV3:
     """
-    Heavy-duty fallback — extremely robust against noise.
-    In production: openai/whisper-large-v3 loaded via HuggingFace.
-    Slower but handles bad audio that Canary can't.
+    Fallback model — extremely robust against noise.
+    Loaded via HuggingFace transformers.
     """
     def __init__(self):
         self.name = "Whisper-Large-v3"
-        self.loaded = False
+        self.model = None
+        self.processor = None  # handles tokenization + feature extraction
 
     def load(self):
+        from transformers import (
+            WhisperForConditionalGeneration,
+            WhisperProcessor
+        )
         print(f"[MODEL] Loading {self.name}...")
-        self.loaded = True
+
+        # Processor = tokenizer + feature extractor combined
+        # converts raw waveform → mel spectrogram → model input
+        self.processor = WhisperProcessor.from_pretrained(
+            "openai/whisper-large-v3"
+        )
+
+        # The actual neural network weights
+        self.model = WhisperForConditionalGeneration.from_pretrained(
+            "openai/whisper-large-v3"
+        )
+
+        # Move to GPU + eval mode (same reasoning as Canary above)
+        self.model = self.model.cuda()
+        self.model.eval()
         print(f"[MODEL] {self.name} ready")
 
     def transcribe(self, audio_bytes: bytes) -> dict:
-        if not self.loaded:
-            raise RuntimeError(f"{self.name} not loaded! Call .load() first")
+        if self.model is None:
+            raise RuntimeError(f"{self.name} not loaded!")
 
-        # Whisper is more robust — consistently higher confidence
-        confidence = random.uniform(0.75, 0.98)
+        # Step 1: bytes → numpy waveform (same as Canary)
+        audio_buffer = io.BytesIO(audio_bytes)
+        waveform, sample_rate = sf.read(audio_buffer, dtype='float32')
+
+        if waveform.ndim == 2:
+            waveform = waveform.mean(axis=1)
+
+        if sample_rate != 16000:
+            import librosa
+            waveform = librosa.resample(
+                waveform, orig_sr=sample_rate, target_sr=16000
+            )
+
+        # Step 2: processor converts waveform → input tensors
+        # return_tensors="pt" = return PyTorch tensors (not numpy)
+        # .to("cuda") = move input tensors to GPU to match model
+        inputs = self.processor(
+            waveform,
+            sampling_rate=16000,
+            return_tensors="pt"
+        ).input_features.to("cuda")
+
+        # Step 3: generate transcription
+        # output_scores=True = return token probabilities for confidence
+        with torch.no_grad():
+            outputs = self.model.generate(
+                inputs,
+                output_scores=True,
+                return_dict_in_generate=True
+            )
+
+        # Step 4: decode token IDs back to text
+        text = self.processor.batch_decode(
+            outputs.sequences,
+            skip_special_tokens=True  # remove <|startoftranscript|> etc
+        )[0]
+
+        # Step 5: compute confidence from token scores
+        # each score is log probability of that token
+        # exp(log_prob) = probability, average across all tokens
+        try:
+            scores = torch.stack(outputs.scores, dim=1)
+            token_probs = torch.exp(scores.max(dim=-1).values)
+            confidence = float(token_probs.mean().item())
+            confidence = max(0.0, min(1.0, confidence))
+        except Exception:
+            confidence = 0.90
+
         return {
-            "text": f"[MOCK Whisper] Transcribed {len(audio_bytes)} bytes",
+            "text": text.strip(),
             "confidence": round(confidence, 2),
             "model": self.name
         }
 
 
 # ============================================
-# THE ROUTER — The Decision Maker
+# THE ROUTER — identical to mock version
+# Only change: MockCanaryQwen → RealCanaryQwen
+#              MockWhisperLargeV3 → RealWhisperLargeV3
 # ============================================
-# This is the core logic that NEVER changes between
-# mock and production. Models get swapped; routing stays.
-
 class TranscriptionRouter:
-    """
-    Routes audio to the right model based on confidence.
-
-    Logic (two-level if-else, NOT a waterfall):
-        1. Send chunk to Canary
-        2. If confidence >= threshold → return Canary result
-        3. If confidence < threshold  → send to Whisper, return its result
-
-    Parakeet is NOT part of this chain. It's a separate
-    speed-priority option, not a third fallback tier.
-    """
     def __init__(self):
-        self.canary = MockCanaryQwen()
-        self.whisper = MockWhisperLargeV3()
+        self.canary = RealCanaryQwen()      # ← only change
+        self.whisper = RealWhisperLargeV3() # ← only change
 
     def load_models(self):
-        """Load all models into GPU memory. Called once at server startup."""
         self.canary.load()
         self.whisper.load()
         print("[ROUTER] All models loaded and ready")
 
     def transcribe(self, audio_bytes: bytes) -> dict:
-        """
-        Route audio through confidence-based system.
-        Returns dict with: text, confidence, model used, was_fallback
-        """
-        # Step 1: Always try Canary first (fast, primary)
         canary_result = self.canary.transcribe(audio_bytes)
 
-        # Step 2: Check confidence against threshold
         if canary_result["confidence"] >= CONFIDENCE_THRESHOLD:
-            # Canary is confident — use its result, done
             return {
                 "text": canary_result["text"],
                 "confidence": canary_result["confidence"],
@@ -139,7 +213,6 @@ class TranscriptionRouter:
                 "was_fallback": False
             }
         else:
-            # Canary is NOT confident — fall back to Whisper
             print(f"[ROUTER] Canary confidence {canary_result['confidence']} "
                   f"< {CONFIDENCE_THRESHOLD}, falling back to Whisper")
             whisper_result = self.whisper.transcribe(audio_bytes)
