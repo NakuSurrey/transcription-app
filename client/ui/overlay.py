@@ -28,7 +28,7 @@ from PyQt6.QtGui import QFont, QColor, QPalette, QIcon
 
 # Import the async workers that connect audio → network → UI
 from ui.workers import LiveWorker, BulkWorker
-from network.cloud_control import CloudController
+from network.connection_manager import ConnectionManager
 
 
 # ============================================
@@ -201,7 +201,7 @@ class TranscriptionOverlay(QMainWindow):
         # Initialize the async workers that connect audio → network → UI
         self.live_worker = LiveWorker(self.signals)
         self.bulk_worker = BulkWorker(self.signals)
-        self.cloud = CloudController()
+        self.connection = ConnectionManager()
 
     # ------------------------------------------
     # WINDOW SETUP
@@ -269,15 +269,23 @@ class TranscriptionOverlay(QMainWindow):
         # --- SERVER STATUS BAR ---
         server_bar = QHBoxLayout()
 
-        self.server_status_label = QLabel("Server: Offline")
+        # Initial label depends on server mode (HPC vs DigitalOcean)
+        if self.connection.is_hpc_mode():
+            self.server_status_label = QLabel("Server: HPC Mode")
+        else:
+            self.server_status_label = QLabel("Server: Offline")
         self.server_status_label.setObjectName("status")
         server_bar.addWidget(self.server_status_label)
 
         server_bar.addStretch()
 
-        self.server_btn = QPushButton("Start Server")
+        # Button label depends on mode:
+        #   HPC: "Check Connection" (only checks if tunnel + server are reachable)
+        #   DigitalOcean: "Start Server" (controls droplet power)
+        initial_btn_label = self.connection.get_button_label(is_available=False)
+        self.server_btn = QPushButton(initial_btn_label)
         self.server_btn.setObjectName("server_off")
-        self.server_btn.setFixedWidth(120)
+        self.server_btn.setFixedWidth(140)
         self.server_btn.clicked.connect(self._toggle_server)
         server_bar.addWidget(self.server_btn)
 
@@ -423,50 +431,85 @@ class TranscriptionOverlay(QMainWindow):
 
     def _toggle_server(self):
         """
-        Start or stop the Digital Ocean GPU droplet.
-        Sends API request to Digital Ocean to power on/off.
+        Handle server button click. Behavior depends on SERVER_MODE:
+          HPC mode: Only checks if server is reachable (you manage sbatch/tunnel manually)
+          DigitalOcean mode: Starts/stops the droplet via API
         """
-        current_text = self.server_btn.text()
-
-        if current_text == "Start Server":
-            self.server_btn.setText("Booting...")
+        if self.connection.is_hpc_mode():
+            # ==========================================
+            # HPC MODE — Check connection only
+            # ==========================================
+            # Button always says "Check Connection"
+            # Clicking it pings /health to see if tunnel + server are alive
+            self.server_btn.setText("Checking...")
             self.server_btn.setEnabled(False)
-            self.server_status_label.setText("Server: Booting...")
+            self.server_status_label.setText("Server: Checking...")
 
-            # Fire Digital Ocean API request in background thread
-            def _boot():
+            def _check():
                 loop = asyncio.new_event_loop()
-                success = loop.run_until_complete(self.cloud.start_server())
+                is_available = loop.run_until_complete(
+                    self.connection.is_server_available()
+                )
                 loop.close()
-                if success:
-                    # Start heartbeat to protect credits
-                    server_ip = os.getenv("SERVER_IP", "localhost")
-                    server_port = os.getenv("SERVER_PORT", "8000")
-                    self.cloud.start_heartbeat(server_ip, server_port)
-                    self.signals.server_status.emit("booting")
+                message = self.connection.get_status_message(is_available)
+                if is_available:
+                    self.signals.server_status.emit("online")
                 else:
-                    self.signals.error.emit("Failed to start server")
-                    self.signals.server_status.emit("offline")
+                    self.signals.server_status.emit("hpc_offline")
 
-            threading.Thread(target=_boot, daemon=True).start()
+            threading.Thread(target=_check, daemon=True).start()
 
-            # Poll server health until it's ready
-            self._poll_server_ready()
         else:
-            # Stop heartbeat first, then power off
-            self.cloud.stop_heartbeat()
+            # ==========================================
+            # DIGITALOCEAN MODE — Start/stop droplet
+            # ==========================================
+            current_text = self.server_btn.text()
 
-            def _shutdown():
-                loop = asyncio.new_event_loop()
-                loop.run_until_complete(self.cloud.stop_server())
-                loop.close()
+            if current_text == "Start Server":
+                self.server_btn.setText("Booting...")
+                self.server_btn.setEnabled(False)
+                self.server_status_label.setText("Server: Booting...")
 
-            threading.Thread(target=_shutdown, daemon=True).start()
+                # Fire Digital Ocean API request in background thread
+                def _boot():
+                    loop = asyncio.new_event_loop()
+                    result = loop.run_until_complete(
+                        self.connection.start_server()
+                    )
+                    loop.close()
+                    if result["success"]:
+                        # Start heartbeat to protect credits
+                        if self.connection.cloud_controller:
+                            server_ip = os.getenv("SERVER_IP", "localhost")
+                            server_port = os.getenv("SERVER_PORT", "8000")
+                            self.connection.cloud_controller.start_heartbeat(
+                                server_ip, server_port
+                            )
+                        self.signals.server_status.emit("booting")
+                    else:
+                        self.signals.error.emit(result["message"])
+                        self.signals.server_status.emit("offline")
 
-            self.server_btn.setText("Start Server")
-            self.server_btn.setObjectName("server_off")
-            self.server_btn.setStyle(self.server_btn.style())
-            self.server_status_label.setText("Server: Offline")
+                threading.Thread(target=_boot, daemon=True).start()
+
+                # Poll server health until it's ready
+                self._poll_server_ready()
+            else:
+                # Stop heartbeat first, then power off
+                if self.connection.cloud_controller:
+                    self.connection.cloud_controller.stop_heartbeat()
+
+                def _shutdown():
+                    loop = asyncio.new_event_loop()
+                    loop.run_until_complete(self.connection.stop_server())
+                    loop.close()
+
+                threading.Thread(target=_shutdown, daemon=True).start()
+
+                self.server_btn.setText("Start Server")
+                self.server_btn.setObjectName("server_off")
+                self.server_btn.setStyle(self.server_btn.style())
+                self.server_status_label.setText("Server: Offline")
 
     def _poll_server_ready(self):
         """
@@ -689,14 +732,27 @@ class TranscriptionOverlay(QMainWindow):
 
     def _on_server_status(self, status: str):
         """Update server status display and button state."""
-        self.server_status_label.setText(f"Server: {status.capitalize()}")
-
         if status == "online":
-            self.server_btn.setText("Stop Server")
+            if self.connection.is_hpc_mode():
+                # HPC mode: server is reachable through tunnel
+                self.server_status_label.setText("Server: HPC Connected")
+                self.server_btn.setText("Check Connection")
+            else:
+                # DigitalOcean mode: droplet is running
+                self.server_status_label.setText("Server: Online")
+                self.server_btn.setText("Stop Server")
             self.server_btn.setObjectName("server_on")
             self.server_btn.setStyle(self.server_btn.style())
             self.server_btn.setEnabled(True)
+        elif status == "hpc_offline":
+            # HPC mode only: tunnel or server not reachable
+            self.server_status_label.setText("Server: Not Reachable")
+            self.server_btn.setText("Check Connection")
+            self.server_btn.setObjectName("server_off")
+            self.server_btn.setStyle(self.server_btn.style())
+            self.server_btn.setEnabled(True)
         elif status == "offline":
+            self.server_status_label.setText("Server: Offline")
             self.server_btn.setText("Start Server")
             self.server_btn.setObjectName("server_off")
             self.server_btn.setStyle(self.server_btn.style())
@@ -745,18 +801,21 @@ class TranscriptionOverlay(QMainWindow):
         # Stop any bulk operation
         self.bulk_worker.stop()
 
-        # Stop heartbeat
-        self.cloud.stop_heartbeat()
+        # Only shut down cloud server in DigitalOcean mode
+        # In HPC mode, the server is managed manually (scancel)
+        if self.connection.is_cloud_mode() and self.connection.cloud_controller:
+            # Stop heartbeat
+            self.connection.cloud_controller.stop_heartbeat()
 
-        # Shut down the cloud server to save credits
-        def _shutdown():
-            loop = asyncio.new_event_loop()
-            loop.run_until_complete(self.cloud.stop_server())
-            loop.close()
+            # Shut down the cloud server to save credits
+            def _shutdown():
+                loop = asyncio.new_event_loop()
+                loop.run_until_complete(self.connection.stop_server())
+                loop.close()
 
-        shutdown_thread = threading.Thread(target=_shutdown, daemon=True)
-        shutdown_thread.start()
-        shutdown_thread.join(timeout=5)  # Wait max 5 sec for shutdown
+            shutdown_thread = threading.Thread(target=_shutdown, daemon=True)
+            shutdown_thread.start()
+            shutdown_thread.join(timeout=5)  # Wait max 5 sec for shutdown
 
         print("[APP] Shutdown complete")
         event.accept()
