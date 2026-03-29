@@ -7,6 +7,16 @@ import soundfile as sf
 import torch
 
 # ============================================
+# cuDNN WORKAROUND
+# ============================================
+# cuDNN (NVIDIA's GPU neural network library) fails to initialize on some
+# MIG (Multi-Instance GPU) slices with CUDNN_STATUS_NOT_INITIALIZED.
+# Disabling it forces PyTorch to use its own CUDA kernels instead.
+# Same math, same results — just slightly slower (~10-20%).
+# For half-second audio chunks, the speed difference is negligible.
+torch.backends.cudnn.enabled = False
+
+# ============================================
 # CONFIDENCE THRESHOLD — unchanged from mock
 # ============================================
 CONFIDENCE_THRESHOLD = 0.7
