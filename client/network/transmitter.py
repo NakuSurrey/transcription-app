@@ -103,7 +103,18 @@ class LiveTransmitter:
         This is the "handshake" — after this, the pipe is open.
         """
         try:
-            self.websocket = await websockets.connect(self.url)
+            # ping_interval: how often the client sends a ping to check if server is alive
+            # ping_timeout: how long to wait for a pong reply before closing the connection
+            #
+            # Defaults are 20s/20s. GPU inference (especially first run with CUDA kernel
+            # compilation) can take 30-60+ seconds on the server. During that time the
+            # server may not reply to pings immediately. These values match the server's
+            # uvicorn ws_ping_interval and ws_ping_timeout settings.
+            self.websocket = await websockets.connect(
+                self.url,
+                ping_interval=60,
+                ping_timeout=60
+            )
             self.connected = True
             print(f"[WSS] Connected to {self.url}")
         except Exception as e:
@@ -156,9 +167,13 @@ class LiveTransmitter:
             # Wait before trying (gives the server/network time to recover)
             await asyncio.sleep(delay)
 
-            # Step 3: Try to connect
+            # Step 3: Try to connect (with same extended ping timeout as connect())
             try:
-                self.websocket = await websockets.connect(self.url)
+                self.websocket = await websockets.connect(
+                    self.url,
+                    ping_interval=60,
+                    ping_timeout=60
+                )
                 self.connected = True
                 self._emit_status("reconnected", "Connection restored")
                 return True

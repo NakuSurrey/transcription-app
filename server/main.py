@@ -1,5 +1,6 @@
 # server/main.py — FastAPI Server Entry Point
 # Phase 2: The Brain (skeleton first, models added next)
+import asyncio
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, UploadFile, File
 from fastapi.responses import JSONResponse
@@ -59,7 +60,12 @@ async def websocket_transcribe(websocket: WebSocket):
             audio_chunk = await websocket.receive_bytes()
 
             # Route audio through confidence-based model system
-            result = router.transcribe(audio_chunk)
+            # asyncio.to_thread() runs the blocking GPU inference in a
+            # background thread so the event loop stays free to respond
+            # to WebSocket pings, health checks, and other connections.
+            # Without this, the event loop freezes during inference and
+            # the WebSocket ping timeout kills the connection.
+            result = await asyncio.to_thread(router.transcribe, audio_chunk)
             await websocket.send_json({
                 "status": "success",
                 "transcript": result["text"],
@@ -92,7 +98,9 @@ async def bulk_transcribe(file: UploadFile = File(...)):
     print(f"[BULK] Received file: {file.filename}, size: {file_size} bytes")
 
     # Route audio through confidence-based model system
-    result = router.transcribe(audio_data)
+    # Same threading fix as WebSocket handler — prevents blocking
+    # the event loop during long GPU inference operations
+    result = await asyncio.to_thread(router.transcribe, audio_data)
 
     return JSONResponse(content={
         "status": "success",
@@ -125,4 +133,17 @@ async def health_check():
 # (not just localhost) — critical for cloud deployment.
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # ws_ping_interval: how often server sends a ping to check if client is alive (seconds)
+    # ws_ping_timeout: how long to wait for a pong reply before closing the connection (seconds)
+    #
+    # Defaults in the websockets library are 20s interval, 20s timeout.
+    # GPU inference (especially first run with CUDA kernel compilation) can take 30-60+ seconds.
+    # The threading fix (asyncio.to_thread) should prevent blocking, but this provides a
+    # safety net in case any synchronous path still holds the event loop temporarily.
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=8000,
+        ws_ping_interval=60,
+        ws_ping_timeout=60
+    )
