@@ -22,10 +22,16 @@
 # Which group of machines to run on. "gpu" = the partition that has
 # NVIDIA A100 GPUs. The cluster also has CPU-only partitions — we skip those.
 
-#SBATCH --gres=gpu:1
-# gres = Generic RESource. gpu:1 = "I need 1 GPU."
-# The cluster has 6x A100 GPUs across 2 nodes. This requests one of them.
-# You could request gpu:2 for two GPUs, but our models only need one.
+#SBATCH --gres=gpu:2g.20gb:1
+# gres = Generic RESource. gpu:2g.20gb:1 = "I need 1 MIG slice with 2 compute
+# units and ~20 GiB VRAM." The cluster splits physical A100 80GB GPUs into
+# MIG (Multi-Instance GPU) slices. Available types:
+#   1g.10gb (~9.5 GiB)  — too small for Canary + Whisper combined (~12 GiB)
+#   2g.20gb (~20 GiB)   — fits both models with ~8 GiB headroom ← we use this
+#   3g.40gb (~40 GiB)   — overkill for our use case
+#   a100    (80 GiB)    — full GPU, only 2 exist, longest queue wait
+# Requesting just "gpu:1" without a type lets Slurm assign the smallest
+# available slice, which caused CUDA OOM on a 1g.10gb (Session 13).
 
 #SBATCH --mem=32G
 # Request 32 GB of system RAM (not GPU VRAM — that's separate).
@@ -77,7 +83,15 @@ module load CUDA/12.2.2
 
 # Activate the conda environment we created with deploy_surrey.sh
 # This points Python to our installed packages (PyTorch, FastAPI, NeMo, etc.)
-source activate transcribe
+#
+# IMPORTANT: Slurm batch jobs run in a non-interactive shell where conda's
+# shell functions (like "conda activate") are not loaded by default.
+# "source activate" fails silently in this context — it runs the system
+# Python instead of the conda env Python, causing ModuleNotFoundError.
+# The fix: eval the conda shell hook first to register the "conda" function,
+# then use "conda activate" (not "source activate").
+eval "$(conda shell.bash hook)"
+conda activate transcribe
 
 echo ""
 echo "[INFO] Python: $(which python) — $(python --version)"

@@ -202,12 +202,13 @@ class TranscriptionOverlay(QMainWindow):
         self.current_transcript = ""
         self.transcript_segments = []  # List of (timestamp, text) for SRT export
 
+        # Initialize connection manager before building UI — _build_ui()
+        # checks self.connection.is_hpc_mode() to configure button labels
+        self.connection = ConnectionManager()
+
         self._setup_window()
         self._build_ui()
         self._connect_signals()
-
-        # Initialize connection manager first — workers may need it
-        self.connection = ConnectionManager()
 
         # Initialize the async workers that connect audio → network → UI
         # LiveWorker receives connection_manager for health monitoring
@@ -736,11 +737,20 @@ class TranscriptionOverlay(QMainWindow):
     # ------------------------------------------
 
     def _on_error(self, message: str):
-        """Display error message in the status label."""
-        self.bulk_status.setText(f"Error: {message}")
-        self.bulk_status.setStyleSheet("color: #FF6B6B;")
-        # Reset color after 3 seconds
-        QTimer.singleShot(3000, lambda: self.bulk_status.setStyleSheet(""))
+        """Display error message in the appropriate status label."""
+        print(f"[ERROR] {message}")
+
+        # Show error on whichever panel is currently active
+        if self.stack.currentIndex() == 0:
+            # Live mode — show in model_label (below transcript area)
+            self.model_label.setText(f"Error: {message}")
+            self.model_label.setStyleSheet("color: #FF6B6B;")
+            QTimer.singleShot(5000, lambda: self.model_label.setStyleSheet(""))
+        else:
+            # Bulk mode — show in bulk_status
+            self.bulk_status.setText(f"Error: {message}")
+            self.bulk_status.setStyleSheet("color: #FF6B6B;")
+            QTimer.singleShot(3000, lambda: self.bulk_status.setStyleSheet(""))
 
     def _on_server_status(self, status: str):
         """Update server status display and button state."""
