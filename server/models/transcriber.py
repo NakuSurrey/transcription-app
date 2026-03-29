@@ -49,7 +49,10 @@ class RealCanaryQwen:
         if self.model is None:
             raise RuntimeError(f"{self.name} not loaded!")
 
-        # Step 1: bytes → numpy waveform
+        # Step 1: WAV bytes → numpy waveform
+        # Client sends a complete WAV file (44-byte header + PCM data)
+        # sf.read() parses the header to learn sample rate, channels, bit depth
+        # then returns the audio as a float32 numpy array in [-1.0, 1.0] range
         audio_buffer = io.BytesIO(audio_bytes)
         waveform, sample_rate = sf.read(audio_buffer, dtype='float32')
 
@@ -132,7 +135,7 @@ class RealWhisperLargeV3:
         if self.model is None:
             raise RuntimeError(f"{self.name} not loaded!")
 
-        # Step 1: bytes → numpy waveform (same as Canary)
+        # Step 1: WAV bytes → numpy waveform (same as Canary)
         audio_buffer = io.BytesIO(audio_bytes)
         waveform, sample_rate = sf.read(audio_buffer, dtype='float32')
 

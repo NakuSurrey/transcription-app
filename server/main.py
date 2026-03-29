@@ -69,8 +69,11 @@ async def websocket_transcribe(websocket: WebSocket):
             })
 
     except Exception as e:
-        # Client disconnected or connection error
-        print(f"[LIVE] Client disconnected: {e}")
+        # Log the full error — not just "disconnected"
+        # This catches both real disconnects AND transcription errors
+        import traceback
+        print(f"[LIVE] Connection closed: {e}")
+        traceback.print_exc()
 
 
 # ============================================
