@@ -55,7 +55,7 @@ class RealCanaryQwen:
         self.model.eval()
         print(f"[MODEL] {self.name} ready")
 
-    def transcribe(self, audio_bytes: bytes) -> dict:
+    def transcribe(self, audio_bytes: bytes, lang: str = "en") -> dict:
         if self.model is None:
             raise RuntimeError(f"{self.name} not loaded!")
 
@@ -79,11 +79,22 @@ class RealCanaryQwen:
                 waveform, orig_sr=sample_rate, target_sr=16000
             )
 
-        # Step 4: transcribe
-        # NeMo transcribe() accepts a list of waveforms
-        # returns list of results — we take index [0]
+        # Step 4: transcribe with language configuration
+        # Canary is a multi-task model — it needs to know:
+        #   task: "asr" = automatic speech recognition (transcribe speech to text)
+        #   source_lang: language of the incoming audio (e.g., "en", "fr", "de", "es")
+        #   target_lang: language of the output text (same as source_lang for transcription)
+        #   pnc: "yes" = include punctuation and capitalization in the output
+        # Without these, NeMo throws: "slot='source_lang' received value=None"
         with torch.no_grad():  # no_grad = don't track gradients, saves memory
-            output = self.model.transcribe([waveform], batch_size=1)
+            output = self.model.transcribe(
+                [waveform],
+                batch_size=1,
+                task="asr",
+                source_lang=lang,
+                target_lang=lang,
+                pnc="yes"
+            )
 
         text = output[0] if isinstance(output[0], str) else output[0].text
 
@@ -215,8 +226,18 @@ class TranscriptionRouter:
         self.whisper.load()
         print("[ROUTER] All models loaded and ready")
 
-    def transcribe(self, audio_bytes: bytes) -> dict:
-        canary_result = self.canary.transcribe(audio_bytes)
+    def transcribe(self, audio_bytes: bytes, lang: str = "en") -> dict:
+        """
+        Route audio through confidence-based model system.
+
+        Args:
+            audio_bytes: Raw WAV audio bytes
+            lang: Language code for transcription (default "en").
+                  Canary supports: "en", "de", "fr", "es"
+                  Whisper supports 90+ languages but we don't pass lang to it —
+                  Whisper auto-detects language from the audio itself.
+        """
+        canary_result = self.canary.transcribe(audio_bytes, lang=lang)
 
         if canary_result["confidence"] >= CONFIDENCE_THRESHOLD:
             return {

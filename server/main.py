@@ -2,7 +2,7 @@
 # Phase 2: The Brain (skeleton first, models added next)
 import asyncio
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, WebSocket, UploadFile, File
+from fastapi import FastAPI, WebSocket, UploadFile, File, Form
 from fastapi.responses import JSONResponse
 import uvicorn
 from models.transcriber import TranscriptionRouter
@@ -52,27 +52,54 @@ async def websocket_transcribe(websocket: WebSocket):
     await websocket.accept()
     print("[LIVE] Client connected")
 
-    try:
-        # Step 2: Keep listening for audio chunks forever
-        # This loop runs until the client disconnects
-        while True:
-            # Receive raw audio bytes from the client
-            audio_chunk = await websocket.receive_bytes()
+    # Default language — used unless client sends a config message
+    # Client can change this at any time by sending a JSON text message:
+    #   {"type": "config", "lang": "fr"}
+    # All subsequent audio chunks will use the new language until changed again.
+    lang = "en"
 
-            # Route audio through confidence-based model system
-            # asyncio.to_thread() runs the blocking GPU inference in a
-            # background thread so the event loop stays free to respond
-            # to WebSocket pings, health checks, and other connections.
-            # Without this, the event loop freezes during inference and
-            # the WebSocket ping timeout kills the connection.
-            result = await asyncio.to_thread(router.transcribe, audio_chunk)
-            await websocket.send_json({
-                "status": "success",
-                "transcript": result["text"],
-                "confidence": result["confidence"],
-                "model_used": result["model_used"],
-                "was_fallback": result["was_fallback"]
-            })
+    try:
+        # Step 2: Keep listening for messages forever
+        # Messages can be either:
+        #   - bytes → audio chunk to transcribe
+        #   - text (JSON) → configuration update (e.g., language change)
+        while True:
+            message = await websocket.receive()
+
+            # --- Text message: configuration update ---
+            if "text" in message:
+                import json
+                try:
+                    config = json.loads(message["text"])
+                    if config.get("type") == "config" and "lang" in config:
+                        lang = config["lang"]
+                        print(f"[LIVE] Language set to: {lang}")
+                        await websocket.send_json({
+                            "status": "config_updated",
+                            "lang": lang
+                        })
+                except (json.JSONDecodeError, KeyError):
+                    pass  # Ignore malformed config messages
+                continue  # Don't try to transcribe text messages
+
+            # --- Binary message: audio chunk to transcribe ---
+            if "bytes" in message:
+                audio_chunk = message["bytes"]
+
+                # Route audio through confidence-based model system
+                # asyncio.to_thread() runs the blocking GPU inference in a
+                # background thread so the event loop stays free to respond
+                # to WebSocket pings, health checks, and other connections.
+                # Without this, the event loop freezes during inference and
+                # the WebSocket ping timeout kills the connection.
+                result = await asyncio.to_thread(router.transcribe, audio_chunk, lang)
+                await websocket.send_json({
+                    "status": "success",
+                    "transcript": result["text"],
+                    "confidence": result["confidence"],
+                    "model_used": result["model_used"],
+                    "was_fallback": result["was_fallback"]
+                })
 
     except Exception as e:
         # Log the full error — not just "disconnected"
@@ -90,17 +117,26 @@ async def websocket_transcribe(websocket: WebSocket):
 # No need for persistent connection. Simple and clean.
 
 @app.post("/api/transcribe")
-async def bulk_transcribe(file: UploadFile = File(...)):
+async def bulk_transcribe(file: UploadFile = File(...), lang: str = Form("en")):
+    """
+    Bulk transcription endpoint.
+
+    Args:
+        file: Audio file to transcribe (WAV format)
+        lang: Language code (default "en"). Sent as a form field alongside the file.
+              Canary supports: "en", "de", "fr", "es"
+              If Canary falls back to Whisper, Whisper auto-detects language.
+    """
     # Step 1: Read the entire uploaded audio file
     audio_data = await file.read()
     file_size = len(audio_data)
 
-    print(f"[BULK] Received file: {file.filename}, size: {file_size} bytes")
+    print(f"[BULK] Received file: {file.filename}, size: {file_size} bytes, lang: {lang}")
 
     # Route audio through confidence-based model system
     # Same threading fix as WebSocket handler — prevents blocking
     # the event loop during long GPU inference operations
-    result = await asyncio.to_thread(router.transcribe, audio_data)
+    result = await asyncio.to_thread(router.transcribe, audio_data, lang)
 
     return JSONResponse(content={
         "status": "success",

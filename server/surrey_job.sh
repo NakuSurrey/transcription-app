@@ -133,4 +133,12 @@ echo ""
 
 cd "$HOME/transcription-app/server"
 echo "[SERVER] Starting FastAPI on 0.0.0.0:8000..."
+
+# PYTHONUNBUFFERED=1 forces Python to flush print() output immediately
+# instead of buffering it. Without this, stdout is buffered when running
+# under Slurm (because there's no real terminal attached), so print()
+# statements sit in memory and don't appear in the .log file until the
+# buffer fills or the process exits. stderr is unbuffered by default,
+# which is why uvicorn's INFO messages appeared but our [MODEL] prints didn't.
+export PYTHONUNBUFFERED=1
 python main.py
