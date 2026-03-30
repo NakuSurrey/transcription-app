@@ -165,7 +165,7 @@ STYLESHEET = """
 
 class AsyncSignals(QObject):
     """Signals to communicate between async thread and UI thread."""
-    transcript_received = pyqtSignal(str, float, str, bool)  # text, confidence, model, fallback
+    transcript_received = pyqtSignal(str, float, str, bool, str)  # text, confidence, model, fallback, source
     bulk_complete = pyqtSignal(str)       # full transcript text
     connection_status = pyqtSignal(bool)  # connected True/False
     server_status = pyqtSignal(str)       # "booting", "alive", "offline"
@@ -602,9 +602,32 @@ class TranscriptionOverlay(QMainWindow):
             self.live_worker.stop()
 
     def _on_transcript_received(self, text: str, confidence: float,
-                                 model: str, fallback: bool):
-        """Called when live transcript text arrives from server."""
-        self.live_text.append(text)
+                                 model: str, fallback: bool, source: str):
+        """
+        Called when live transcript text arrives from server.
+
+        Args:
+            text: The transcribed text (already de-duplicated by worker)
+            confidence: Model confidence score (0.0 to 1.0)
+            model: Name of the model that produced this transcript
+            fallback: True if Whisper was used instead of Canary
+            source: "speaker" (system audio) or "mic" (your voice)
+        """
+        # Label the transcript based on which audio source it came from
+        # "Speaker" = what's playing through your speakers (other people in a call)
+        # "You" = what your microphone picked up (your voice)
+        if source == "mic":
+            label = "You"
+            # Cyan color for your voice — visually distinct from speaker text
+            self.live_text.append(f'<span style="color: #7EC8E3;">[{label}]</span> {text}')
+        elif source == "speaker":
+            label = "Speaker"
+            # Default light gray for speaker audio
+            self.live_text.append(f'<span style="color: #C0C0C0;">[{label}]</span> {text}')
+        else:
+            # Unknown source (shouldn't happen, but safe fallback)
+            self.live_text.append(text)
+
         fallback_note = " (fallback)" if fallback else ""
         self.model_label.setText(
             f"Model: {model}{fallback_note} | Confidence: {confidence:.0%}"

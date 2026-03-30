@@ -58,11 +58,17 @@ async def websocket_transcribe(websocket: WebSocket):
     # All subsequent audio chunks will use the new language until changed again.
     lang = "en"
 
+    # Source label — identifies whether audio came from speakers or microphone.
+    # Client sends: {"type": "config", "source": "speaker"} or "mic"
+    # Server echoes this back with the transcript so the UI can label it.
+    # Default "unknown" means client hasn't identified the source yet.
+    source = "unknown"
+
     try:
         # Step 2: Keep listening for messages forever
         # Messages can be either:
         #   - bytes → audio chunk to transcribe
-        #   - text (JSON) → configuration update (e.g., language change)
+        #   - text (JSON) → configuration update (e.g., language change, source label)
         while True:
             message = await websocket.receive()
 
@@ -71,12 +77,17 @@ async def websocket_transcribe(websocket: WebSocket):
                 import json
                 try:
                     config = json.loads(message["text"])
-                    if config.get("type") == "config" and "lang" in config:
-                        lang = config["lang"]
-                        print(f"[LIVE] Language set to: {lang}")
+                    if config.get("type") == "config":
+                        if "lang" in config:
+                            lang = config["lang"]
+                            print(f"[LIVE] Language set to: {lang}")
+                        if "source" in config:
+                            source = config["source"]
+                            print(f"[LIVE] Source set to: {source}")
                         await websocket.send_json({
                             "status": "config_updated",
-                            "lang": lang
+                            "lang": lang,
+                            "source": source
                         })
                 except (json.JSONDecodeError, KeyError):
                     pass  # Ignore malformed config messages
@@ -98,7 +109,8 @@ async def websocket_transcribe(websocket: WebSocket):
                     "transcript": result["text"],
                     "confidence": result["confidence"],
                     "model_used": result["model_used"],
-                    "was_fallback": result["was_fallback"]
+                    "was_fallback": result["was_fallback"],
+                    "source": source
                 })
 
     except Exception as e:

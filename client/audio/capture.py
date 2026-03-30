@@ -1,9 +1,12 @@
-# client/audio/capture.py — Live Audio Capture + VAD Filter
+# client/audio/capture.py — Live Audio Capture + VAD Filter + Sliding Window
 # Phase 3: The Ears (Live Mode)
+# Phase 6: Sliding Window Buffer + Microphone Capture
 #
-# This module does TWO jobs:
+# This module does FOUR jobs:
 #   1. Tap into WASAPI loopback to copy system audio (what speakers play)
-#   2. Run VAD to filter out silence before sending anything to the server
+#   2. Capture microphone input (your voice)
+#   3. Run VAD to filter out silence before buffering
+#   4. Accumulate audio in sliding window buffers and send tagged chunks
 #
 # RUNS ON: Your Windows laptop (client-side)
 # REQUIRES: pyaudiowpatch (pip install pyaudiowpatch)
@@ -25,7 +28,20 @@ import time
 # All audio is resampled to this rate before sending
 TARGET_SAMPLE_RATE = 16000  # 16kHz — standard for speech recognition models
 
-CHUNK_DURATION = 0.5      # Each chunk = 0.5 seconds of audio
+CHUNK_DURATION = 0.5      # Each internal capture chunk = 0.5 seconds of audio
+                           # This is the granularity of the buffer — NOT how often we send
+
+# --- Sliding Window Config ---
+# WINDOW_DURATION: how many seconds of audio to include in each send.
+# Longer = more context for Canary = better accuracy, but bigger payload.
+# 5 seconds captures most complete sentences.
+WINDOW_DURATION = 5.0
+
+# SEND_INTERVAL: how often (in seconds) to send a window to the server.
+# 1 second means the UI updates roughly every 1s + server inference time.
+# The window slides forward by SEND_INTERVAL seconds between sends,
+# so consecutive windows overlap by (WINDOW_DURATION - SEND_INTERVAL) seconds.
+SEND_INTERVAL = 1.0
 
 # VAD (Voice Activity Detection) settings
 VAD_ENERGY_THRESHOLD = 500  # Audio energy above this = speech, below = silence
@@ -203,7 +219,7 @@ def pcm_to_wav(pcm_bytes: bytes, sample_rate: int = 16000,
 
 
 # ============================================
-# WASAPI LOOPBACK AUDIO CAPTURER
+# WASAPI LOOPBACK AUDIO CAPTURER (Speakers)
 # ============================================
 # Taps into Windows Audio Session API to capture
 # a copy of whatever audio is playing through speakers.
@@ -211,28 +227,27 @@ def pcm_to_wav(pcm_bytes: bytes, sample_rate: int = 16000,
 # WASAPI loopback devices only support their native sample rate
 # (whatever rate the Windows audio engine runs at — usually 48000 or 44100 Hz).
 # We open the stream at the native rate, then resample each chunk down
-# to 16000 Hz (what speech models expect) before putting it in the queue.
+# to 16000 Hz (what speech models expect) before putting it in the buffer.
 
 class AudioCapturer:
     """
     Captures system audio via WASAPI loopback on Windows.
+    Now returns resampled PCM chunks (not WAV-wrapped) for use
+    with the sliding window buffer in DualCapturer.
 
-    Usage:
+    Usage (standalone — for backwards compatibility):
         capturer = AudioCapturer()
         capturer.start()
-
-        # Get speech-only audio chunks (silence already filtered)
-        while True:
-            chunk = capturer.get_chunk()  # blocks until speech available
-            if chunk:
-                send_to_server(chunk)
-
+        chunk = capturer.get_chunk()  # blocks until speech available
         capturer.stop()
+
+    Usage (with DualCapturer — preferred):
+        DualCapturer creates this internally and reads from its buffer.
     """
 
     def __init__(self):
         self.audio = None               # PyAudio instance
-        self.stream = None               # Audio stream from WASAPI
+        self.stream = None              # Audio stream from WASAPI
         self.is_running = False          # Flag to control capture loop
         self.capture_thread = None       # Background thread for capture
 
@@ -289,7 +304,7 @@ class AudioCapturer:
         """
         Runs in background thread. Continuously reads audio from WASAPI
         at the device's native rate, resamples to 16kHz mono, applies VAD,
-        and puts speech chunks into the queue.
+        and puts speech chunks into the queue as raw PCM bytes.
         """
         while self.is_running:
             try:
@@ -309,17 +324,9 @@ class AudioCapturer:
                         num_channels=self.native_channels
                     )
 
-                    # Wrap raw PCM in WAV header before sending
-                    # This makes the server format-agnostic — it reads the
-                    # header to learn sample rate, channels, and bit depth
-                    # instead of hardcoding assumptions about the format
-                    wav_chunk = pcm_to_wav(
-                        resampled,
-                        sample_rate=TARGET_SAMPLE_RATE,
-                        num_channels=1,
-                        bits_per_sample=16
-                    )
-                    self.audio_queue.put(wav_chunk)
+                    # Put raw PCM into the queue (WAV wrapping happens later
+                    # in DualCapturer when the full window is assembled)
+                    self.audio_queue.put(resampled)
                 # If silence, we do NOTHING — chunk is discarded
                 # This is where bandwidth savings happen
 
@@ -348,7 +355,7 @@ class AudioCapturer:
         # (vs 8000 samples at 16000 Hz — 3x more data per chunk)
         self.native_chunk_size = int(self.native_rate * CHUNK_DURATION)
 
-        print(f"[AUDIO] Opening stream: {self.native_rate} Hz, "
+        print(f"[AUDIO] Opening loopback stream: {self.native_rate} Hz, "
               f"{self.native_channels} ch, chunk={self.native_chunk_size} samples")
 
         # Step 3: Open the audio stream at the NATIVE rate
@@ -368,7 +375,7 @@ class AudioCapturer:
         self.is_running = True
         self.capture_thread = threading.Thread(target=self._capture_loop, daemon=True)
         self.capture_thread.start()
-        print(f"[AUDIO] Capture started (native={self.native_rate} Hz → "
+        print(f"[AUDIO] Loopback capture started (native={self.native_rate} Hz → "
               f"target={TARGET_SAMPLE_RATE} Hz)")
 
     def stop(self):
@@ -385,16 +392,422 @@ class AudioCapturer:
         if self.audio:
             self.audio.terminate()
 
-        print("[AUDIO] Capture stopped")
+        print("[AUDIO] Loopback capture stopped")
 
     def get_chunk(self, timeout=1.0):
         """
         Get next speech audio chunk from the queue.
         Returns None if no speech detected within timeout.
 
-        Audio is already resampled to 16kHz mono — ready to send to server.
+        Audio is already resampled to 16kHz mono — raw PCM bytes.
         """
         try:
             return self.audio_queue.get(timeout=timeout)
         except queue.Empty:
             return None  # No speech in the last `timeout` seconds
+
+
+# ============================================
+# MICROPHONE CAPTURER
+# ============================================
+# Captures audio from the default microphone input device.
+# Same structure as AudioCapturer but uses the standard input
+# device instead of WASAPI loopback.
+#
+# WHY a separate class?
+#   - Loopback and microphone are different device types in Windows
+#   - Loopback uses a special WASAPI API to find the "mirror" of speakers
+#   - Microphone uses the standard default input device
+#   - They may have different native sample rates and channel counts
+#   - Keeping them separate means each handles its own device quirks
+
+class MicCapturer:
+    """
+    Captures audio from the default microphone on Windows.
+    Outputs resampled 16kHz mono PCM chunks into a queue.
+
+    Usage (standalone):
+        mic = MicCapturer()
+        mic.start()
+        chunk = mic.get_chunk()
+        mic.stop()
+    """
+
+    def __init__(self):
+        self.audio = None
+        self.stream = None
+        self.is_running = False
+        self.capture_thread = None
+
+        self.native_rate = None
+        self.native_channels = None
+        self.native_chunk_size = None
+
+        self.audio_queue = queue.Queue()
+
+    def _find_mic_device(self):
+        """
+        Find the default microphone input device.
+
+        Unlike loopback (which mirrors speaker output), this is the
+        standard audio input — your physical microphone or headset mic.
+
+        Returns:
+            dict: PyAudio device info for the default input device
+        """
+        p = pyaudio.PyAudio()
+
+        try:
+            # Get the default input device directly
+            # This is whatever Windows has set as the default recording device
+            # in Settings → Sound → Input
+            default_input = p.get_default_input_device_info()
+            print(f"[MIC] Found microphone: {default_input['name']}")
+            print(f"[MIC] Native sample rate: {int(default_input['defaultSampleRate'])} Hz")
+            print(f"[MIC] Native channels: {default_input['maxInputChannels']}")
+            return default_input
+        except Exception as e:
+            raise RuntimeError(
+                f"No microphone found. Check that a microphone is connected "
+                f"and set as the default recording device in Windows Sound settings. "
+                f"Error: {e}"
+            )
+        finally:
+            p.terminate()
+
+    def _capture_loop(self):
+        """
+        Runs in background thread. Reads audio from microphone,
+        resamples to 16kHz mono, applies VAD, queues speech chunks.
+        """
+        while self.is_running:
+            try:
+                audio_data = self.stream.read(
+                    self.native_chunk_size, exception_on_overflow=False
+                )
+
+                if is_speech(audio_data, num_channels=self.native_channels):
+                    resampled = resample_audio(
+                        audio_data,
+                        native_rate=self.native_rate,
+                        target_rate=TARGET_SAMPLE_RATE,
+                        num_channels=self.native_channels
+                    )
+                    self.audio_queue.put(resampled)
+
+            except Exception as e:
+                if self.is_running:
+                    print(f"[MIC] Capture error: {e}")
+                break
+
+    def start(self):
+        """Start capturing microphone audio."""
+        if self.is_running:
+            print("[MIC] Already capturing")
+            return
+
+        mic_device = self._find_mic_device()
+
+        self.native_rate = int(mic_device["defaultSampleRate"])
+        self.native_channels = int(mic_device["maxInputChannels"])
+        self.native_chunk_size = int(self.native_rate * CHUNK_DURATION)
+
+        print(f"[MIC] Opening mic stream: {self.native_rate} Hz, "
+              f"{self.native_channels} ch, chunk={self.native_chunk_size} samples")
+
+        self.audio = pyaudio.PyAudio()
+        self.stream = self.audio.open(
+            format=pyaudio.paInt16,
+            channels=self.native_channels,
+            rate=self.native_rate,
+            input=True,
+            input_device_index=mic_device["index"],
+            frames_per_buffer=self.native_chunk_size
+        )
+
+        self.is_running = True
+        self.capture_thread = threading.Thread(target=self._capture_loop, daemon=True)
+        self.capture_thread.start()
+        print(f"[MIC] Microphone capture started (native={self.native_rate} Hz → "
+              f"target={TARGET_SAMPLE_RATE} Hz)")
+
+    def stop(self):
+        """Stop capturing and clean up."""
+        self.is_running = False
+
+        if self.capture_thread:
+            self.capture_thread.join(timeout=2)
+
+        if self.stream:
+            self.stream.stop_stream()
+            self.stream.close()
+
+        if self.audio:
+            self.audio.terminate()
+
+        print("[MIC] Microphone capture stopped")
+
+    def get_chunk(self, timeout=1.0):
+        """Get next speech chunk from the mic queue. Returns None on timeout."""
+        try:
+            return self.audio_queue.get(timeout=timeout)
+        except queue.Empty:
+            return None
+
+
+# ============================================
+# DUAL CAPTURER — Sliding Window + Interleaving
+# ============================================
+# Owns both AudioCapturer (speakers) and MicCapturer (your voice).
+# Runs a buffer thread that:
+#   1. Drains both capturers' queues into separate sliding buffers
+#   2. On a timer (SEND_INTERVAL), alternates which buffer to send
+#   3. Assembles the buffer contents into a WAV, tags it with the source
+#   4. Puts (wav_bytes, source_label) into the output queue
+#
+# WHY interleave instead of parallel?
+#   Parallel would mean two audio windows hitting the GPU at the same time.
+#   Canary runs one inference at a time on the GPU. Two simultaneous sends
+#   would just queue up inside the server anyway. Interleaving does the
+#   same thing explicitly, with the benefit that we control the order
+#   and avoid unpredictable server-side queuing.
+#
+# BUFFER MEMORY:
+#   Each buffer stores the last WINDOW_DURATION seconds of PCM chunks.
+#   Old chunks are trimmed from the front when the buffer exceeds the
+#   max window size. Audio captured while the server is processing a
+#   previous window stays in the buffer — nothing is lost.
+
+class DualCapturer:
+    """
+    Captures from both speakers (loopback) and microphone simultaneously.
+    Manages sliding window buffers and interleaved sending.
+
+    Output queue contains tuples: (wav_bytes, source_label)
+        wav_bytes: Complete WAV file bytes (header + PCM)
+        source_label: "speaker" or "mic"
+
+    Usage:
+        capturer = DualCapturer()
+        capturer.start()
+
+        while True:
+            item = capturer.get_chunk(timeout=1.0)
+            if item:
+                wav_bytes, source = item
+                # source is "speaker" or "mic"
+                send_to_server(wav_bytes, source)
+
+        capturer.stop()
+    """
+
+    def __init__(self):
+        self.speaker_capturer = AudioCapturer()
+        self.mic_capturer = MicCapturer()
+
+        # --- Sliding window buffers ---
+        # Each buffer is a list of raw PCM byte chunks (16kHz mono int16).
+        # Each chunk represents CHUNK_DURATION seconds of audio.
+        # The buffer grows as audio comes in. When it exceeds
+        # max_chunks_in_window, old chunks are trimmed from the front.
+        self.speaker_buffer = []
+        self.mic_buffer = []
+
+        # Lock protects buffer access — capture thread writes, buffer thread reads
+        # threading.Lock = mutual exclusion: only one thread can hold it at a time.
+        # Without this, the capture thread could be appending to the buffer
+        # at the exact moment the buffer thread is reading + trimming it,
+        # which could corrupt the list or cause a crash.
+        self.speaker_lock = threading.Lock()
+        self.mic_lock = threading.Lock()
+
+        # How many 0.5s chunks fit in one window
+        # Example: 5.0 / 0.5 = 10 chunks max per buffer
+        self.max_chunks_in_window = int(WINDOW_DURATION / CHUNK_DURATION)
+
+        # Output queue — what LiveWorker reads from
+        # Items are tuples: (wav_bytes, "speaker") or (wav_bytes, "mic")
+        self.output_queue = queue.Queue()
+
+        # Controls the buffer→queue thread
+        self.is_running = False
+        self.buffer_thread = None
+
+        # Tracks which source to send next: alternates between "speaker" and "mic"
+        # Starts with "speaker" so the first transcription you see is what
+        # others are saying (usually the more important context in a meeting)
+        self._next_source = "speaker"
+
+    def _drain_into_buffers(self):
+        """
+        Pull all available chunks from both capturers' queues
+        into the sliding window buffers.
+
+        Called frequently by the buffer thread. Non-blocking —
+        if a queue is empty, we just skip it.
+
+        After draining, trims each buffer to max_chunks_in_window
+        so it only holds the most recent WINDOW_DURATION seconds.
+        """
+        # Drain speaker queue into speaker buffer
+        while True:
+            try:
+                chunk = self.speaker_capturer.audio_queue.get_nowait()
+                with self.speaker_lock:
+                    self.speaker_buffer.append(chunk)
+                    # Trim: keep only the last max_chunks_in_window chunks
+                    if len(self.speaker_buffer) > self.max_chunks_in_window:
+                        self.speaker_buffer = self.speaker_buffer[-self.max_chunks_in_window:]
+            except queue.Empty:
+                break
+
+        # Drain mic queue into mic buffer
+        while True:
+            try:
+                chunk = self.mic_capturer.audio_queue.get_nowait()
+                with self.mic_lock:
+                    self.mic_buffer.append(chunk)
+                    if len(self.mic_buffer) > self.max_chunks_in_window:
+                        self.mic_buffer = self.mic_buffer[-self.max_chunks_in_window:]
+            except queue.Empty:
+                break
+
+    def _assemble_window(self, buffer, lock):
+        """
+        Take all chunks currently in the buffer, concatenate them into
+        one continuous PCM byte string, and wrap it in a WAV header.
+
+        Args:
+            buffer: list of raw PCM byte chunks
+            lock: threading.Lock protecting this buffer
+
+        Returns:
+            WAV bytes (header + PCM) if buffer has audio, None if empty
+        """
+        with lock:
+            if not buffer:
+                return None
+            # Concatenate all PCM chunks into one continuous byte string
+            # b"".join() is like string concatenation but for bytes
+            combined_pcm = b"".join(buffer)
+
+        # Wrap the combined PCM in a WAV header so the server
+        # can read sample rate, channels, etc. from the header
+        wav_bytes = pcm_to_wav(
+            combined_pcm,
+            sample_rate=TARGET_SAMPLE_RATE,
+            num_channels=1,
+            bits_per_sample=16
+        )
+        return wav_bytes
+
+    def _buffer_loop(self):
+        """
+        Runs in background thread. On a timer:
+            1. Drain both capturers' queues into buffers
+            2. Check which source is next (alternating)
+            3. Assemble that buffer's window into WAV
+            4. Put (wav_bytes, source) into output_queue
+            5. Switch to the other source for next time
+
+        If the current source's buffer is empty (no speech detected),
+        skip it and try the other source. This prevents blocking on
+        silence from one source while the other has speech.
+        """
+        while self.is_running:
+            # Wait for SEND_INTERVAL before sending the next window
+            # Using a short sleep loop instead of time.sleep(SEND_INTERVAL)
+            # so we can exit quickly when stop() is called
+            wait_start = time.time()
+            while self.is_running and (time.time() - wait_start) < SEND_INTERVAL:
+                time.sleep(0.05)  # 50ms granularity
+
+            if not self.is_running:
+                break
+
+            # Step 1: Drain both queues into buffers
+            self._drain_into_buffers()
+
+            # Step 2: Try the next source in the interleave rotation
+            if self._next_source == "speaker":
+                wav = self._assemble_window(self.speaker_buffer, self.speaker_lock)
+                if wav:
+                    self.output_queue.put((wav, "speaker"))
+                    self._next_source = "mic"
+                else:
+                    # Speaker buffer empty — try mic instead so we don't waste a cycle
+                    wav = self._assemble_window(self.mic_buffer, self.mic_lock)
+                    if wav:
+                        self.output_queue.put((wav, "mic"))
+                    # Next time still try speaker (don't get stuck on mic)
+                    self._next_source = "mic"
+            else:
+                wav = self._assemble_window(self.mic_buffer, self.mic_lock)
+                if wav:
+                    self.output_queue.put((wav, "mic"))
+                    self._next_source = "speaker"
+                else:
+                    # Mic buffer empty — try speaker instead
+                    wav = self._assemble_window(self.speaker_buffer, self.speaker_lock)
+                    if wav:
+                        self.output_queue.put((wav, "speaker"))
+                    self._next_source = "speaker"
+
+    def start(self):
+        """Start both capturers and the buffer management thread."""
+        if self.is_running:
+            print("[DUAL] Already running")
+            return
+
+        self.is_running = True
+
+        # Start both audio capture streams
+        # Each starts its own capture thread internally
+        try:
+            self.speaker_capturer.start()
+        except Exception as e:
+            print(f"[DUAL] Speaker capture failed: {e}")
+            # Continue without speaker — mic might still work
+
+        try:
+            self.mic_capturer.start()
+        except Exception as e:
+            print(f"[DUAL] Mic capture failed: {e}")
+            # Continue without mic — speaker might still work
+
+        # Start the buffer management thread
+        # This thread drains both capturers' queues, manages the sliding
+        # windows, and puts assembled WAV chunks into the output queue
+        self.buffer_thread = threading.Thread(target=self._buffer_loop, daemon=True)
+        self.buffer_thread.start()
+        print(f"[DUAL] Dual capture started (window={WINDOW_DURATION}s, "
+              f"interval={SEND_INTERVAL}s, interleaved)")
+
+    def stop(self):
+        """Stop both capturers and the buffer thread."""
+        self.is_running = False
+
+        if self.buffer_thread:
+            self.buffer_thread.join(timeout=2)
+
+        self.speaker_capturer.stop()
+        self.mic_capturer.stop()
+
+        # Clear buffers
+        self.speaker_buffer.clear()
+        self.mic_buffer.clear()
+
+        print("[DUAL] Dual capture stopped")
+
+    def get_chunk(self, timeout=1.0):
+        """
+        Get next tagged audio window from the output queue.
+
+        Returns:
+            Tuple of (wav_bytes, source_label) where source_label is
+            "speaker" or "mic". Returns None on timeout.
+        """
+        try:
+            return self.output_queue.get(timeout=timeout)
+        except queue.Empty:
+            return None
