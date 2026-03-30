@@ -22,14 +22,16 @@
 # Which group of machines to run on. "gpu" = the partition that has
 # NVIDIA A100 GPUs. The cluster also has CPU-only partitions — we skip those.
 
-#SBATCH --gres=gpu:2g.20gb:1
-# gres = Generic RESource. gpu:2g.20gb:1 = "I need 1 MIG slice with 2 compute
-# units and ~20 GiB VRAM." The cluster splits physical A100 80GB GPUs into
+#SBATCH --gres=gpu:3g.40gb:1
+# gres = Generic RESource. gpu:3g.40gb:1 = "I need 1 MIG slice with 3 compute
+# units and ~40 GiB VRAM." The cluster splits physical A100 80GB GPUs into
 # MIG (Multi-Instance GPU) slices. Available types:
 #   1g.10gb (~9.5 GiB)  — too small for Canary + Whisper combined (~12 GiB)
-#   2g.20gb (~20 GiB)   — fits both models with ~8 GiB headroom ← we use this
-#   3g.40gb (~40 GiB)   — overkill for our use case
+#   2g.20gb (~20 GiB)   — fits both models, but only available on gpu-node01
+#   3g.40gb (~40 GiB)   — fits both models with ~28 GiB headroom ← we use this
 #   a100    (80 GiB)    — full GPU, only 2 exist, longest queue wait
+# Changed from 2g.20gb to 3g.40gb because gpu-node01 (which had 2g.20gb slices)
+# went into "drained" state. gpu-node02 only has 3g.40gb and a100 available.
 # Requesting just "gpu:1" without a type lets Slurm assign the smallest
 # available slice, which caused CUDA OOM on a 1g.10gb (Session 13).
 
