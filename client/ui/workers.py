@@ -13,6 +13,8 @@
 import asyncio
 import json
 import threading
+import time
+from difflib import SequenceMatcher
 
 # Import our modules
 import sys
@@ -59,6 +61,15 @@ def deduplicate_transcript(old_text: str, new_text: str) -> str:
     Remove overlapping text between consecutive transcripts from the
     same source (caused by sliding window overlap).
 
+    Uses a TWO-PASS approach:
+      Pass 1 (exact match): Check if the last N words of old_text exactly
+        match the first N words of new_text (case-insensitive, punctuation-stripped).
+        This is fast and handles the common case.
+      Pass 2 (fuzzy match): If no exact match, use SequenceMatcher to find
+        overlap even when Canary rephrases slightly (e.g., "is starting" → "starts").
+        This handles the edge case where the model produces different wording
+        for the same audio in overlapping windows.
+
     Args:
         old_text: The previous transcript for this source
         new_text: The new transcript just received for this source
@@ -70,41 +81,74 @@ def deduplicate_transcript(old_text: str, new_text: str) -> str:
     if not old_text or not new_text:
         return new_text
 
-    # Split into words, lowercased for comparison
     old_words = old_text.strip().split()
     new_words = new_text.strip().split()
 
     if not old_words or not new_words:
         return new_text
 
-    # Try to find overlap: check if the last N words of old_text
-    # match the first N words of new_text.
-    # Start with the longest possible overlap and work down.
-    # max_overlap: we can't overlap more words than exist in either transcript
-    max_overlap = min(len(old_words), len(new_words))
+    def normalize(w: str) -> str:
+        """Strip punctuation and lowercase for comparison."""
+        return w.lower().strip(".,!?;:\"'")
 
+    # ---- PASS 1: Exact word-level match (fast) ----
+    # Try to find the longest sequence where the last N words of old_text
+    # exactly match the first N words of new_text.
+    max_overlap = min(len(old_words), len(new_words))
     best_overlap = 0
 
     for overlap_len in range(1, max_overlap + 1):
-        # Take the last `overlap_len` words from old transcript
-        old_suffix = [w.lower().strip(".,!?;:") for w in old_words[-overlap_len:]]
-        # Take the first `overlap_len` words from new transcript
-        new_prefix = [w.lower().strip(".,!?;:") for w in new_words[:overlap_len]]
-
+        old_suffix = [normalize(w) for w in old_words[-overlap_len:]]
+        new_prefix = [normalize(w) for w in new_words[:overlap_len]]
         if old_suffix == new_prefix:
             best_overlap = overlap_len
 
     if best_overlap > 0:
-        # Return only the words after the overlapping portion
         remaining = new_words[best_overlap:]
-        if remaining:
-            return " ".join(remaining)
-        else:
-            # Entire new transcript was a repeat — nothing new
-            return ""
-    else:
-        # No overlap detected — return full new transcript
-        return new_text
+        return " ".join(remaining) if remaining else ""
+
+    # ---- PASS 2: Fuzzy match (handles rephrasing) ----
+    # Canary sometimes produces slightly different wording for overlapping
+    # audio. Example:
+    #   old: "The meeting is starting now"
+    #   new: "The meeting starts now let us begin"
+    #   Exact match fails because "is starting" ≠ "starts"
+    #
+    # Strategy: Take the last WINDOW of old_text and compare it against
+    # progressively longer prefixes of new_text using SequenceMatcher.
+    # If similarity exceeds FUZZY_THRESHOLD, we found a fuzzy overlap.
+    #
+    # FUZZY_THRESHOLD: How similar two phrases must be to count as overlap.
+    # 0.6 means 60% of words must match. Lower = more aggressive dedup
+    # (risks removing genuinely new text). Higher = less aggressive
+    # (risks letting duplicates through). 0.6 is a balanced default.
+    FUZZY_THRESHOLD = 0.6
+
+    # Only check the last portion of old_text — overlap can't be longer
+    # than our sliding window's overlap duration.
+    # With 5s window and 1s interval, overlap is 4s ≈ ~12-15 words.
+    # We check up to 20 words to be safe.
+    max_fuzzy_check = min(20, len(old_words), len(new_words))
+    old_tail = " ".join([normalize(w) for w in old_words[-max_fuzzy_check:]])
+
+    best_fuzzy_overlap = 0
+    best_fuzzy_ratio = 0.0
+
+    for prefix_len in range(3, max_fuzzy_check + 1):
+        # Compare old tail against new prefix of length prefix_len
+        new_prefix_str = " ".join([normalize(w) for w in new_words[:prefix_len]])
+        ratio = SequenceMatcher(None, old_tail, new_prefix_str).ratio()
+
+        if ratio >= FUZZY_THRESHOLD and ratio > best_fuzzy_ratio:
+            best_fuzzy_overlap = prefix_len
+            best_fuzzy_ratio = ratio
+
+    if best_fuzzy_overlap > 0:
+        remaining = new_words[best_fuzzy_overlap:]
+        return " ".join(remaining) if remaining else ""
+
+    # No overlap detected (exact or fuzzy) — return full new transcript
+    return new_text
 
 
 # ============================================
@@ -158,6 +202,25 @@ class LiveWorker:
             "mic": ""
         }
 
+        # --- Source staleness tracking ---
+        # Stores the timestamp (time.time()) of the last transcript for each source.
+        # If more than STALE_THRESHOLD seconds have passed since the last transcript
+        # for a source, we clear the stored transcript for that source before dedup.
+        #
+        # WHY: If speaker goes silent for 30 seconds and then speaks again, the
+        # old transcript from 30 seconds ago has zero overlap with the new audio.
+        # But the dedup function might find false fuzzy matches between completely
+        # unrelated text. Clearing the stale transcript avoids this.
+        #
+        # STALE_THRESHOLD: 10 seconds. Our sliding window is 5 seconds with 1-second
+        # interval. If no audio arrives for 10 seconds, any stored transcript is from
+        # at least 5 seconds before the current audio — zero real overlap possible.
+        self._last_transcript_time = {
+            "speaker": 0.0,
+            "mic": 0.0
+        }
+        self.STALE_THRESHOLD = 10.0
+
     def _on_transmitter_status(self, status: str, message: str):
         """
         Callback that LiveTransmitter calls when connection state changes.
@@ -195,6 +258,7 @@ class LiveWorker:
 
         # Clear de-duplication state from any previous session
         self._last_transcript = {"speaker": "", "mic": ""}
+        self._last_transcript_time = {"speaker": 0.0, "mic": 0.0}
 
         self.thread = threading.Thread(target=self._run_pipeline, daemon=True)
         self.thread.start()
@@ -207,7 +271,20 @@ class LiveWorker:
             )
 
     def stop(self):
-        """Stop the pipeline and clean up."""
+        """
+        Stop the pipeline and clean up.
+
+        Shutdown sequence:
+          1. Set running=False so the main loop exits on next iteration
+          2. Stop health monitoring (no more /health pings)
+          3. Stop audio capture (releases WASAPI devices)
+          4. Cancel all pending asyncio tasks (this is the key fix)
+             - If _async_pipeline is stuck on recv(), task.cancel() injects
+               a CancelledError into that await, waking it up immediately
+             - The Future resolves as "cancelled" instead of being orphaned
+          5. Stop the event loop (now safe — no pending Futures)
+          6. Wait for the thread to finish
+        """
         self.running = False
 
         # Stop health monitoring
@@ -217,12 +294,29 @@ class LiveWorker:
         # Stop the dual capturer (stops both speaker + mic)
         self.capturer.stop()
 
-        # Stop the asyncio loop if running
+        # Graceful asyncio shutdown: cancel pending tasks BEFORE stopping loop
+        # This prevents "Event loop stopped before Future completed" by
+        # ensuring every pending recv()/send() Future is resolved (as cancelled)
+        # before the loop shuts down.
         if self.loop and self.loop.is_running():
+            # Schedule task cancellation from the main thread into the loop's thread
+            self.loop.call_soon_threadsafe(self._cancel_all_tasks)
             self.loop.call_soon_threadsafe(self.loop.stop)
 
         if self.thread:
             self.thread.join(timeout=3)
+
+    def _cancel_all_tasks(self):
+        """
+        Cancel all pending asyncio tasks in this loop.
+
+        Called via call_soon_threadsafe from stop() — runs inside the
+        event loop's thread. asyncio.all_tasks() returns every task that
+        hasn't finished yet. Calling task.cancel() on each one injects
+        CancelledError into whatever await they're suspended on.
+        """
+        for task in asyncio.all_tasks(self.loop):
+            task.cancel()
 
     def _run_pipeline(self):
         """
@@ -239,6 +333,12 @@ class LiveWorker:
 
         try:
             self.loop.run_until_complete(self._async_pipeline())
+        except asyncio.CancelledError:
+            # Expected when stop() cancels pending tasks — not an error.
+            # This happens when the user clicks Stop while recv() is waiting.
+            # task.cancel() injects CancelledError into the await, which
+            # propagates up to here. We catch it silently.
+            pass
         except Exception as e:
             self.signals.error.emit(f"Live pipeline error: {e}")
         finally:
@@ -284,13 +384,25 @@ class LiveWorker:
                 wav_bytes, source = item
 
                 # Send a config message BEFORE the audio to tell the server
-                # which source this audio came from. The server will echo
-                # the source label back with the transcript response.
+                # which source this audio came from.
+                #
+                # FIRE-AND-FORGET: We send config but do NOT await a response.
+                # Why: Awaiting recv() here created a second pending Future.
+                # If the user clicked Stop while we were waiting for the config
+                # ack, the event loop was destroyed with that Future still pending,
+                # causing "Event loop stopped before Future completed."
+                #
+                # This is safe because the server processes config messages
+                # synchronously — it updates its source variable BEFORE reading
+                # the next message. By the time our audio binary arrives, the
+                # config is already applied.
+                #
+                # The server still sends a config_updated response. We handle
+                # that below by skipping any non-transcript messages in the
+                # receive loop.
                 try:
                     config_msg = json.dumps({"type": "config", "source": source})
                     await self.transmitter.websocket.send(config_msg)
-                    # Read the config_updated response (discard it)
-                    config_response = await self.transmitter.websocket.recv()
                 except Exception:
                     pass  # Config send failed — audio will still work, just no label
 
@@ -298,8 +410,26 @@ class LiveWorker:
                 try:
                     result = await self.transmitter.send_chunk(wav_bytes)
 
+                    # The server may have sent a config_updated ack before
+                    # the transcript. send_chunk internally does send + recv,
+                    # so if it got the config ack instead of a transcript,
+                    # we need to recv again for the actual transcript.
+                    # Loop until we get a transcript (status=success or error).
+                    while result.get("status") == "config_updated":
+                        raw = await self.transmitter.websocket.recv()
+                        result = json.loads(raw)
+
                     transcript = result.get("transcript", "")
                     source_label = result.get("source", source)
+
+                    # --- Staleness check ---
+                    # If this source hasn't sent audio in STALE_THRESHOLD seconds,
+                    # the stored transcript is from a completely different audio
+                    # context. Clear it to prevent false dedup matches.
+                    now = time.time()
+                    last_time = self._last_transcript_time.get(source_label, 0.0)
+                    if (now - last_time) > self.STALE_THRESHOLD:
+                        self._last_transcript[source_label] = ""
 
                     # De-duplicate: remove overlapping text from sliding window
                     new_text = deduplicate_transcript(
@@ -307,10 +437,11 @@ class LiveWorker:
                         transcript
                     )
 
-                    # Update the stored transcript for this source
+                    # Update the stored transcript AND timestamp for this source.
                     # Store the FULL transcript (not deduplicated) because
-                    # the next window's overlap will be against the full text
+                    # the next window's overlap will be against the full text.
                     self._last_transcript[source_label] = transcript
+                    self._last_transcript_time[source_label] = now
 
                     # Only emit to UI if there's actually new text
                     if new_text and new_text.strip():

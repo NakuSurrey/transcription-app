@@ -145,11 +145,38 @@ class YouTubeExtractor:
         # Add progress hook if callback provided
         if progress_callback:
             def progress_hook(d):
-                if d["status"] == "downloading":
-                    percent = d.get("_percent_str", "0%").strip()
-                    progress_callback(float(percent.replace("%", "")), "Downloading")
-                elif d["status"] == "finished":
-                    progress_callback(100.0, "Processing audio")
+                # IMPORTANT: This entire hook is wrapped in try/except because
+                # progress reporting is cosmetic — it should NEVER crash the
+                # actual download. If anything fails here, the download continues
+                # silently without progress updates.
+                #
+                # Previous bug: yt-dlp's _percent_str field started including
+                # ANSI terminal color codes (e.g., '\x1b[0;94m  0.0\x1b[0m%')
+                # after a yt-dlp auto-update. Our code did:
+                #   float(percent.replace("%", ""))
+                # which crashed because float() can't parse ANSI escape sequences.
+                #
+                # Fix: Use raw byte counts (downloaded_bytes / total_bytes) instead
+                # of parsing formatted strings. Raw integers never contain ANSI codes,
+                # locale-specific formatting, or any other display artifacts.
+                try:
+                    if d["status"] == "downloading":
+                        downloaded = d.get("downloaded_bytes", 0)
+                        # total_bytes may not exist for some streams (e.g., live).
+                        # total_bytes_estimate is the fallback provided by yt-dlp
+                        # when the exact size isn't known yet.
+                        total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
+                        if total > 0:
+                            percent = (downloaded / total) * 100.0
+                        else:
+                            percent = 0.0
+                        # Cap at 100% — downloaded_bytes can briefly exceed
+                        # total_bytes_estimate if the estimate was low
+                        progress_callback(min(percent, 100.0), "Downloading")
+                    elif d["status"] == "finished":
+                        progress_callback(100.0, "Processing audio")
+                except Exception:
+                    pass  # Progress display is cosmetic — never kill the download
 
             ydl_opts["progress_hooks"] = [progress_hook]
 
