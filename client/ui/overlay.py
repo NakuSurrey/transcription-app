@@ -183,10 +183,10 @@ STYLESHEET = """
 
 
 # ============================================
-# COMPACT RECORDING BAR
+# RECORDING PANEL — Floating Transcript Display
 # ============================================
-# A thin horizontal bar that appears during live recording.
-# Shows real-time transcript, auto-scrolls, fades old text.
+# A floating dark panel that appears during live recording.
+# Shows real-time transcript in a scrollable text area.
 # Invisible to screen sharing (ghost mode).
 #
 # WHY A SEPARATE WINDOW?
@@ -194,196 +194,229 @@ STYLESHEET = """
 #   dozens of widgets and managing two layouts in one widget tree.
 #   A separate QMainWindow is cleaner — each has its own layout,
 #   and they share the same LiveWorker and AsyncSignals objects.
+#
+# WHY QTextEdit INSTEAD OF QLabel?
+#   QLabel is a single-line static text widget — no scroll bar, clips overflow.
+#   QTextEdit is a scrollable multi-line document widget — supports HTML,
+#   auto-scrolls to bottom on append, and shows full transcript history.
 
-COMPACT_STYLESHEET = """
+RECORDING_PANEL_STYLESHEET = """
     QMainWindow {
-        background-color: rgba(15, 15, 20, 230);
+        background-color: rgba(15, 15, 20, 235);
     }
-    QLabel {
-        color: #E8E8E8;
-        font-size: 13px;
+    QWidget#panel_title_bar {
+        background-color: rgba(25, 25, 35, 245);
+        border-top-left-radius: 8px;
+        border-top-right-radius: 8px;
+    }
+    QLabel#panel_grip {
+        color: #444444;
+        font-size: 12px;
+    }
+    QLabel#panel_title_text {
+        color: #999999;
+        font-size: 11px;
+        font-weight: bold;
     }
     QLabel#rec_indicator {
         color: #FF4444;
-        font-size: 14px;
+        font-size: 12px;
         font-weight: bold;
     }
-    QLabel#compact_transcript {
-        color: #F0F0F0;
-        font-size: 13px;
-        font-family: 'Segoe UI', 'Consolas', monospace;
+    QLabel#timer_label {
+        color: #888888;
+        font-size: 11px;
+        font-family: 'Consolas', monospace;
     }
     QPushButton#stop_btn {
         background-color: rgba(180, 40, 40, 220);
         color: #FFFFFF;
         border: 1px solid rgba(255, 80, 80, 150);
         border-radius: 4px;
-        padding: 4px 16px;
-        font-size: 12px;
+        padding: 4px 12px;
+        font-size: 11px;
         font-weight: bold;
     }
     QPushButton#stop_btn:hover {
         background-color: rgba(220, 50, 50, 240);
     }
-    QWidget#compact_title_bar {
-        background-color: rgba(25, 25, 35, 240);
-    }
-    QLabel#compact_grip {
-        color: #444444;
-        font-size: 11px;
-    }
-    QLabel#compact_title_text {
-        color: #999999;
-        font-size: 10px;
-    }
-    QPushButton#compact_title_close {
+    QPushButton#panel_close {
         background-color: transparent;
         color: #666666;
         border: none;
-        font-size: 11px;
-        padding: 0px 4px;
+        font-size: 13px;
+        font-weight: bold;
+        padding: 2px 6px;
     }
-    QPushButton#compact_title_close:hover {
+    QPushButton#panel_close:hover {
         color: #FF6B6B;
+    }
+    QTextEdit#panel_transcript {
+        background-color: rgba(20, 20, 30, 200);
+        color: #F0F0F0;
+        border: none;
+        border-bottom-left-radius: 8px;
+        border-bottom-right-radius: 8px;
+        padding: 8px 12px;
+        font-size: 13px;
+        font-family: 'Segoe UI', 'Consolas', monospace;
+    }
+    QScrollBar:vertical {
+        background-color: rgba(30, 30, 40, 150);
+        width: 6px;
+        border-radius: 3px;
+    }
+    QScrollBar::handle:vertical {
+        background-color: rgba(100, 100, 120, 180);
+        border-radius: 3px;
+        min-height: 20px;
+    }
+    QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+        height: 0px;
     }
 """
 
 
 class CompactBar(QMainWindow):
     """
-    Thin horizontal recording bar shown during live transcription.
+    Floating recording panel shown during live transcription.
 
     Features:
-      - Full screen width, ~60px tall, snapped to top edge
-      - Red REC indicator with blinking animation
-      - Auto-scrolling transcript with fade on older text
-      - Stop button to end recording and return to full window
+      - 420x280 dark translucent floating panel
+      - Title bar with grip icon, REC indicator, timer, Stop button, close
+      - Scrollable QTextEdit for live transcript (auto-scrolls on new text)
       - Ghost mode (invisible to screen capture)
-      - Draggable vertically (snap to top or bottom edge)
+      - Draggable from title bar to any position on screen
 
     Signals:
       - stop_requested: emitted when Stop is clicked. The main window
         listens for this to show itself and display the full transcript.
     """
 
-    # Signal emitted when user clicks Stop on the compact bar
+    # Signal emitted when user clicks Stop on the recording panel
     stop_requested = pyqtSignal()
 
     def __init__(self):
         super().__init__()
         self.drag_position = None
 
-        # Store transcript lines for display
-        # Each entry: (source_label, text) e.g. ("Speaker", "hello world")
+        # Store transcript lines for transfer to main window on stop
+        # Each entry: (source_label, text) e.g. ("[Speaker]", "hello world")
         self._transcript_lines = []
         # Maximum lines to keep in memory (older ones discarded)
-        self._max_lines = 100
+        self._max_lines = 500
+
+        # Elapsed time tracking
+        self._elapsed_seconds = 0
 
         self._setup_window()
         self._build_ui()
-        self._setup_blink_timer()
+        self._setup_timers()
 
     def _setup_window(self):
-        """Configure the thin, borderless, always-on-top bar."""
-        # Get screen dimensions to set full width
-        screen = QApplication.primaryScreen().geometry()
-        bar_height = 80
-
+        """Configure the floating, borderless, always-on-top panel."""
         self.setWindowTitle("Recording")
-        self.setFixedSize(screen.width(), bar_height)
-        # Position at top edge of screen
-        self.move(0, 0)
+        self.setFixedSize(420, 280)
 
-        # Same flags as main window: borderless, always on top, translucent
+        # Position at top-right of screen (out of the way but visible)
+        screen = QApplication.primaryScreen().geometry()
+        self.move(screen.width() - 440, 20)
+
+        # Frameless + always on top + Tool (no taskbar entry) + translucent
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint |
             Qt.WindowType.WindowStaysOnTopHint |
-            Qt.WindowType.Tool  # Tool flag: doesn't show in taskbar
+            Qt.WindowType.Tool
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setStyleSheet(COMPACT_STYLESHEET)
+        self.setStyleSheet(RECORDING_PANEL_STYLESHEET)
 
     def _build_ui(self):
-        """Build the compact bar layout with title bar + content row."""
+        """Build the recording panel: title bar on top, transcript area below."""
         central = QWidget()
         self.setCentralWidget(central)
-        # Vertical layout: title bar on top, content row below
         outer_layout = QVBoxLayout(central)
         outer_layout.setContentsMargins(0, 0, 0, 0)
         outer_layout.setSpacing(0)
 
-        # --- COMPACT TITLE BAR (thin drag handle) ---
-        compact_title = QWidget()
-        compact_title.setObjectName("compact_title_bar")
-        compact_title.setFixedHeight(20)
-        ct_layout = QHBoxLayout(compact_title)
-        ct_layout.setContentsMargins(12, 2, 12, 2)
-        ct_layout.setSpacing(6)
+        # =============================================
+        # TITLE BAR — grip + REC + timer + Stop + close
+        # =============================================
+        title_bar = QWidget()
+        title_bar.setObjectName("panel_title_bar")
+        title_bar.setFixedHeight(36)
+        tb_layout = QHBoxLayout(title_bar)
+        tb_layout.setContentsMargins(10, 4, 10, 4)
+        tb_layout.setSpacing(8)
 
-        # Grip icon
-        ct_grip = QLabel("⠿")
-        ct_grip.setObjectName("compact_grip")
-        ct_layout.addWidget(ct_grip)
+        # Grip icon — drag handle indicator
+        grip = QLabel("⠿")
+        grip.setObjectName("panel_grip")
+        tb_layout.addWidget(grip)
 
-        # Title text
-        ct_title = QLabel("Recording")
-        ct_title.setObjectName("compact_title_text")
-        ct_layout.addWidget(ct_title)
-
-        ct_layout.addStretch()
-
-        # Close button
-        ct_close = QPushButton("✕")
-        ct_close.setObjectName("compact_title_close")
-        ct_close.setFixedSize(16, 16)
-        ct_close.clicked.connect(self._on_stop_clicked)
-        ct_layout.addWidget(ct_close)
-
-        outer_layout.addWidget(compact_title)
-
-        # --- CONTENT ROW (REC + transcript + Stop) ---
-        content = QWidget()
-        content_layout = QHBoxLayout(content)
-        content_layout.setContentsMargins(16, 4, 16, 4)
-        content_layout.setSpacing(12)
-
-        # --- REC indicator (red dot + text) ---
+        # REC indicator (blinking red dot + text)
         self.rec_label = QLabel("● REC")
         self.rec_label.setObjectName("rec_indicator")
-        self.rec_label.setFixedWidth(60)
-        content_layout.addWidget(self.rec_label)
+        self.rec_label.setFixedWidth(55)
+        tb_layout.addWidget(self.rec_label)
 
-        # --- Transcript display area ---
-        # Uses a QLabel instead of QTextEdit for simplicity.
-        # QLabel with word wrap disabled acts as a single-line ticker.
-        # We show the last 2-3 lines of transcript, with older text fading.
-        self.transcript_label = QLabel("")
-        self.transcript_label.setObjectName("compact_transcript")
-        self.transcript_label.setWordWrap(False)
-        # Allow the label to expand to fill available space
-        content_layout.addWidget(self.transcript_label, stretch=1)
+        # Elapsed time display
+        self.timer_label = QLabel("00:00")
+        self.timer_label.setObjectName("timer_label")
+        self.timer_label.setFixedWidth(45)
+        tb_layout.addWidget(self.timer_label)
 
-        # --- Stop button ---
+        tb_layout.addStretch()
+
+        # Stop button
         self.stop_btn = QPushButton("■ Stop")
         self.stop_btn.setObjectName("stop_btn")
-        self.stop_btn.setFixedWidth(80)
+        self.stop_btn.setFixedWidth(70)
         self.stop_btn.clicked.connect(self._on_stop_clicked)
-        content_layout.addWidget(self.stop_btn)
+        tb_layout.addWidget(self.stop_btn)
 
-        outer_layout.addWidget(content)
+        # Close button
+        close_btn = QPushButton("✕")
+        close_btn.setObjectName("panel_close")
+        close_btn.setFixedSize(22, 22)
+        close_btn.clicked.connect(self._on_stop_clicked)
+        tb_layout.addWidget(close_btn)
 
-    def _setup_blink_timer(self):
+        outer_layout.addWidget(title_bar)
+
+        # =============================================
+        # TRANSCRIPT AREA — scrollable QTextEdit
+        # =============================================
+        # QTextEdit is a scrollable multi-line document widget.
+        # Unlike QLabel, it supports: scroll bars, HTML formatting,
+        # auto-scroll on append, and full transcript history.
+        self.transcript_area = QTextEdit()
+        self.transcript_area.setObjectName("panel_transcript")
+        self.transcript_area.setReadOnly(True)
+        self.transcript_area.setPlaceholderText("Listening for audio...")
+        # Disable the text edit's own frame (we handle borders via stylesheet)
+        self.transcript_area.setFrameShape(QFrame.Shape.NoFrame)
+        outer_layout.addWidget(self.transcript_area)
+
+    def _setup_timers(self):
         """
-        Blink the REC indicator every 800ms to show recording is active.
-        Alternates between visible and hidden red dot.
+        Set up two timers:
+        1. Blink timer — toggles REC indicator every 800ms
+        2. Elapsed timer — updates MM:SS display every 1000ms
         """
+        # --- Blink timer (REC indicator) ---
         self._blink_visible = True
         self._blink_timer = QTimer()
         self._blink_timer.setInterval(800)
         self._blink_timer.timeout.connect(self._blink_rec)
 
+        # --- Elapsed timer (recording duration) ---
+        self._elapsed_timer = QTimer()
+        self._elapsed_timer.setInterval(1000)
+        self._elapsed_timer.timeout.connect(self._tick_elapsed)
+
     def _blink_rec(self):
-        """Toggle REC indicator visibility."""
+        """Toggle REC indicator between red dot and dimmed state."""
         self._blink_visible = not self._blink_visible
         if self._blink_visible:
             self.rec_label.setText("● REC")
@@ -392,17 +425,30 @@ class CompactBar(QMainWindow):
             self.rec_label.setText("  REC")
             self.rec_label.setStyleSheet("color: #888888;")
 
+    def _tick_elapsed(self):
+        """Increment elapsed seconds and update timer display."""
+        self._elapsed_seconds += 1
+        minutes = self._elapsed_seconds // 60
+        seconds = self._elapsed_seconds % 60
+        self.timer_label.setText(f"{minutes:02d}:{seconds:02d}")
+
     # ------------------------------------------
     # PUBLIC METHODS (called by main window)
     # ------------------------------------------
 
     def start_recording(self):
-        """Show the bar and start blinking."""
+        """Show the panel, start timers, enable ghost mode."""
+        # Reset state
         self._transcript_lines.clear()
-        self.transcript_label.setText("")
-        self._blink_timer.start()
+        self.transcript_area.clear()
+        self._elapsed_seconds = 0
+        self.timer_label.setText("00:00")
 
-        # Enable ghost mode
+        # Start both timers
+        self._blink_timer.start()
+        self._elapsed_timer.start()
+
+        # Show and enable ghost mode
         self.show()
         try:
             hwnd = int(self.winId())
@@ -411,13 +457,18 @@ class CompactBar(QMainWindow):
             pass  # Ghost mode is optional — may fail on non-Windows
 
     def stop_recording(self):
-        """Hide the bar and stop blinking."""
+        """Hide the panel and stop all timers."""
         self._blink_timer.stop()
+        self._elapsed_timer.stop()
         self.hide()
 
     def add_transcript(self, text: str, source: str):
         """
-        Add a new transcript line to the display.
+        Append a new transcript line to the scrollable display.
+
+        Uses QTextEdit.append() which:
+        1. Adds the HTML-formatted line at the bottom
+        2. Automatically scrolls to show the new line
 
         Args:
             text: The transcribed text
@@ -429,26 +480,21 @@ class CompactBar(QMainWindow):
         label = "[You]" if source == "mic" else "[Speaker]"
         self._transcript_lines.append((label, text.strip()))
 
-        # Trim to max lines
+        # Trim stored lines (memory safety)
         if len(self._transcript_lines) > self._max_lines:
             self._transcript_lines = self._transcript_lines[-self._max_lines:]
 
-        # Build display string — show last 2 lines with fade effect
-        # Older line is dimmer (gray), newest line is bright (white)
-        display_parts = []
-        lines_to_show = self._transcript_lines[-2:]
+        # Color code by source: blue for You, light gray for Speaker
+        if source == "mic":
+            color = "#7EC8E3"
+        else:
+            color = "#C0C0C0"
 
-        for i, (lbl, txt) in enumerate(lines_to_show):
-            if i == 0 and len(lines_to_show) > 1:
-                # Older line — faded
-                color = "#666666"
-            else:
-                # Newest line — bright
-                color = "#7EC8E3" if lbl == "[You]" else "#C0C0C0"
-            display_parts.append(f'<span style="color: {color};">{lbl}</span> {txt}')
-
-        self.transcript_label.setText(
-            '<span style="color: #F0F0F0;">  ···  </span>'.join(display_parts)
+        # Append HTML-formatted line to the QTextEdit
+        # QTextEdit.append() adds to the bottom and auto-scrolls
+        self.transcript_area.append(
+            f'<span style="color: {color}; font-weight: bold;">{label}</span> '
+            f'<span style="color: #F0F0F0;">{text.strip()}</span>'
         )
 
     def get_all_transcript_lines(self):
@@ -470,7 +516,7 @@ class CompactBar(QMainWindow):
         self.stop_requested.emit()
 
     # ------------------------------------------
-    # DRAGGABLE (vertical only — snaps to top/bottom)
+    # DRAGGABLE (free movement from title bar area)
     # ------------------------------------------
 
     def mousePressEvent(self, event):
@@ -479,24 +525,14 @@ class CompactBar(QMainWindow):
             self.drag_position = event.globalPosition().toPoint() - self.pos()
 
     def mouseMoveEvent(self, event):
-        """Move bar vertically during drag."""
+        """Move panel to follow mouse during drag."""
         if self.drag_position and event.buttons() & Qt.MouseButton.LeftButton:
-            new_pos = event.globalPosition().toPoint() - self.drag_position
-            # Constrain to vertical movement only (keep x=0, full width)
-            self.move(0, new_pos.y())
+            self.move(event.globalPosition().toPoint() - self.drag_position)
 
     def mouseReleaseEvent(self, event):
-        """Snap to nearest edge (top or bottom) on release."""
+        """Clear drag state on release."""
         if event.button() == Qt.MouseButton.LeftButton:
             self.drag_position = None
-            # Snap to whichever edge is closer
-            screen = QApplication.primaryScreen().geometry()
-            mid_y = screen.height() // 2
-            current_y = self.pos().y()
-            if current_y < mid_y:
-                self.move(0, 0)  # Snap to top
-            else:
-                self.move(0, screen.height() - self.height())  # Snap to bottom
 
 
 # ============================================
