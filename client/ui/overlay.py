@@ -152,6 +152,33 @@ STYLESHEET = """
         background-color: rgba(255, 255, 255, 20);
         max-height: 1px;
     }
+    QWidget#title_bar {
+        background-color: rgba(30, 30, 40, 220);
+        border-top-left-radius: 8px;
+        border-top-right-radius: 8px;
+    }
+    QLabel#grip {
+        color: #555555;
+        font-size: 14px;
+    }
+    QLabel#title_bar_text {
+        color: #CCCCCC;
+        font-size: 12px;
+        font-weight: bold;
+    }
+    QPushButton#title_close {
+        background-color: transparent;
+        color: #888888;
+        border: none;
+        font-size: 14px;
+        font-weight: bold;
+        padding: 2px 8px;
+    }
+    QPushButton#title_close:hover {
+        color: #FF6B6B;
+        background-color: rgba(255, 80, 80, 40);
+        border-radius: 4px;
+    }
 """
 
 
@@ -198,6 +225,27 @@ COMPACT_STYLESHEET = """
     QPushButton#stop_btn:hover {
         background-color: rgba(220, 50, 50, 240);
     }
+    QWidget#compact_title_bar {
+        background-color: rgba(25, 25, 35, 240);
+    }
+    QLabel#compact_grip {
+        color: #444444;
+        font-size: 11px;
+    }
+    QLabel#compact_title_text {
+        color: #999999;
+        font-size: 10px;
+    }
+    QPushButton#compact_title_close {
+        background-color: transparent;
+        color: #666666;
+        border: none;
+        font-size: 11px;
+        padding: 0px 4px;
+    }
+    QPushButton#compact_title_close:hover {
+        color: #FF6B6B;
+    }
 """
 
 
@@ -239,7 +287,7 @@ class CompactBar(QMainWindow):
         """Configure the thin, borderless, always-on-top bar."""
         # Get screen dimensions to set full width
         screen = QApplication.primaryScreen().geometry()
-        bar_height = 60
+        bar_height = 80
 
         self.setWindowTitle("Recording")
         self.setFixedSize(screen.width(), bar_height)
@@ -256,18 +304,54 @@ class CompactBar(QMainWindow):
         self.setStyleSheet(COMPACT_STYLESHEET)
 
     def _build_ui(self):
-        """Build the compact bar layout."""
+        """Build the compact bar layout with title bar + content row."""
         central = QWidget()
         self.setCentralWidget(central)
-        layout = QHBoxLayout(central)
-        layout.setContentsMargins(16, 4, 16, 4)
-        layout.setSpacing(12)
+        # Vertical layout: title bar on top, content row below
+        outer_layout = QVBoxLayout(central)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setSpacing(0)
+
+        # --- COMPACT TITLE BAR (thin drag handle) ---
+        compact_title = QWidget()
+        compact_title.setObjectName("compact_title_bar")
+        compact_title.setFixedHeight(20)
+        ct_layout = QHBoxLayout(compact_title)
+        ct_layout.setContentsMargins(12, 2, 12, 2)
+        ct_layout.setSpacing(6)
+
+        # Grip icon
+        ct_grip = QLabel("⠿")
+        ct_grip.setObjectName("compact_grip")
+        ct_layout.addWidget(ct_grip)
+
+        # Title text
+        ct_title = QLabel("Recording")
+        ct_title.setObjectName("compact_title_text")
+        ct_layout.addWidget(ct_title)
+
+        ct_layout.addStretch()
+
+        # Close button
+        ct_close = QPushButton("✕")
+        ct_close.setObjectName("compact_title_close")
+        ct_close.setFixedSize(16, 16)
+        ct_close.clicked.connect(self._on_stop_clicked)
+        ct_layout.addWidget(ct_close)
+
+        outer_layout.addWidget(compact_title)
+
+        # --- CONTENT ROW (REC + transcript + Stop) ---
+        content = QWidget()
+        content_layout = QHBoxLayout(content)
+        content_layout.setContentsMargins(16, 4, 16, 4)
+        content_layout.setSpacing(12)
 
         # --- REC indicator (red dot + text) ---
         self.rec_label = QLabel("● REC")
         self.rec_label.setObjectName("rec_indicator")
         self.rec_label.setFixedWidth(60)
-        layout.addWidget(self.rec_label)
+        content_layout.addWidget(self.rec_label)
 
         # --- Transcript display area ---
         # Uses a QLabel instead of QTextEdit for simplicity.
@@ -277,14 +361,16 @@ class CompactBar(QMainWindow):
         self.transcript_label.setObjectName("compact_transcript")
         self.transcript_label.setWordWrap(False)
         # Allow the label to expand to fill available space
-        layout.addWidget(self.transcript_label, stretch=1)
+        content_layout.addWidget(self.transcript_label, stretch=1)
 
         # --- Stop button ---
         self.stop_btn = QPushButton("■ Stop")
         self.stop_btn.setObjectName("stop_btn")
         self.stop_btn.setFixedWidth(80)
         self.stop_btn.clicked.connect(self._on_stop_clicked)
-        layout.addWidget(self.stop_btn)
+        content_layout.addWidget(self.stop_btn)
+
+        outer_layout.addWidget(content)
 
     def _setup_blink_timer(self):
         """
@@ -515,28 +601,43 @@ class TranscriptionOverlay(QMainWindow):
         main_layout.setContentsMargins(16, 12, 16, 12)
         main_layout.setSpacing(8)
 
-        # --- TOP BAR: Title + Close button ---
-        top_bar = QHBoxLayout()
+        # --- CUSTOM TITLE BAR ---
+        # A distinct strip at the top with grip icon, title, and close button.
+        # Visually separates the "grab here" area from the content below.
+        # QWidget container gives it its own background color via stylesheet.
+        title_bar = QWidget()
+        title_bar.setObjectName("title_bar")
+        title_bar.setFixedHeight(32)
+        title_bar_layout = QHBoxLayout(title_bar)
+        title_bar_layout.setContentsMargins(10, 4, 10, 4)
+        title_bar_layout.setSpacing(8)
 
-        title = QLabel("Transcription")
-        title.setObjectName("title")
-        top_bar.addWidget(title)
+        # Grip icon — universal drag indicator (six-dot braille pattern)
+        grip = QLabel("⠿")
+        grip.setObjectName("grip")
+        title_bar_layout.addWidget(grip)
 
-        top_bar.addStretch()
+        # Title text
+        title_text = QLabel("Transcription")
+        title_text.setObjectName("title_bar_text")
+        title_bar_layout.addWidget(title_text)
+
+        title_bar_layout.addStretch()
 
         # Ghost toggle button
         self.ghost_btn = QPushButton("Ghost: OFF")
         self.ghost_btn.setFixedWidth(100)
         self.ghost_btn.clicked.connect(self._toggle_ghost)
-        top_bar.addWidget(self.ghost_btn)
+        title_bar_layout.addWidget(self.ghost_btn)
 
-        # Close button (since we removed the title bar)
+        # Close button
         close_btn = QPushButton("✕")
-        close_btn.setFixedSize(30, 30)
+        close_btn.setObjectName("title_close")
+        close_btn.setFixedSize(24, 24)
         close_btn.clicked.connect(self.close)
-        top_bar.addWidget(close_btn)
+        title_bar_layout.addWidget(close_btn)
 
-        main_layout.addLayout(top_bar)
+        main_layout.addWidget(title_bar)
 
         # --- SEPARATOR ---
         sep = QFrame()

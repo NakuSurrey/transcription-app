@@ -47,3 +47,32 @@ desktop.ini
 # ============================================
 downloads/
 *.wav
+*.webm
+*.webm.part
+
+# ============================================
+# CATEGORY 7: BUILD / DISTRIBUTION
+# PyInstaller output, dist packages
+# WHY: Generated artifacts, not source code
+# ============================================
+build/
+dist/
+*.spec
+*.exe
+
+# ============================================
+# CATEGORY 8: EDITOR AND TOOL MISC
+# JetBrains, Sublime, vim, etc.
+# ============================================
+.idea/
+*.swp
+*.swo
+*~
+
+# ============================================
+# CATEGORY 9: PERSONAL REFERENCE FILES
+# Session notes, demo scripts — not source code
+# ============================================
+DEMO_SCRIPT.md
+PHASE_*_REFERENCE.md
+reference_notes_*.md
