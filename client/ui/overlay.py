@@ -156,6 +156,264 @@ STYLESHEET = """
 
 
 # ============================================
+# COMPACT RECORDING BAR
+# ============================================
+# A thin horizontal bar that appears during live recording.
+# Shows real-time transcript, auto-scrolls, fades old text.
+# Invisible to screen sharing (ghost mode).
+#
+# WHY A SEPARATE WINDOW?
+#   We could resize the main window, but that requires hiding/showing
+#   dozens of widgets and managing two layouts in one widget tree.
+#   A separate QMainWindow is cleaner — each has its own layout,
+#   and they share the same LiveWorker and AsyncSignals objects.
+
+COMPACT_STYLESHEET = """
+    QMainWindow {
+        background-color: rgba(15, 15, 20, 230);
+    }
+    QLabel {
+        color: #E8E8E8;
+        font-size: 13px;
+    }
+    QLabel#rec_indicator {
+        color: #FF4444;
+        font-size: 14px;
+        font-weight: bold;
+    }
+    QLabel#compact_transcript {
+        color: #F0F0F0;
+        font-size: 13px;
+        font-family: 'Segoe UI', 'Consolas', monospace;
+    }
+    QPushButton#stop_btn {
+        background-color: rgba(180, 40, 40, 220);
+        color: #FFFFFF;
+        border: 1px solid rgba(255, 80, 80, 150);
+        border-radius: 4px;
+        padding: 4px 16px;
+        font-size: 12px;
+        font-weight: bold;
+    }
+    QPushButton#stop_btn:hover {
+        background-color: rgba(220, 50, 50, 240);
+    }
+"""
+
+
+class CompactBar(QMainWindow):
+    """
+    Thin horizontal recording bar shown during live transcription.
+
+    Features:
+      - Full screen width, ~60px tall, snapped to top edge
+      - Red REC indicator with blinking animation
+      - Auto-scrolling transcript with fade on older text
+      - Stop button to end recording and return to full window
+      - Ghost mode (invisible to screen capture)
+      - Draggable vertically (snap to top or bottom edge)
+
+    Signals:
+      - stop_requested: emitted when Stop is clicked. The main window
+        listens for this to show itself and display the full transcript.
+    """
+
+    # Signal emitted when user clicks Stop on the compact bar
+    stop_requested = pyqtSignal()
+
+    def __init__(self):
+        super().__init__()
+        self.drag_position = None
+
+        # Store transcript lines for display
+        # Each entry: (source_label, text) e.g. ("Speaker", "hello world")
+        self._transcript_lines = []
+        # Maximum lines to keep in memory (older ones discarded)
+        self._max_lines = 100
+
+        self._setup_window()
+        self._build_ui()
+        self._setup_blink_timer()
+
+    def _setup_window(self):
+        """Configure the thin, borderless, always-on-top bar."""
+        # Get screen dimensions to set full width
+        screen = QApplication.primaryScreen().geometry()
+        bar_height = 60
+
+        self.setWindowTitle("Recording")
+        self.setFixedSize(screen.width(), bar_height)
+        # Position at top edge of screen
+        self.move(0, 0)
+
+        # Same flags as main window: borderless, always on top, translucent
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint |
+            Qt.WindowType.WindowStaysOnTopHint |
+            Qt.WindowType.Tool  # Tool flag: doesn't show in taskbar
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setStyleSheet(COMPACT_STYLESHEET)
+
+    def _build_ui(self):
+        """Build the compact bar layout."""
+        central = QWidget()
+        self.setCentralWidget(central)
+        layout = QHBoxLayout(central)
+        layout.setContentsMargins(16, 4, 16, 4)
+        layout.setSpacing(12)
+
+        # --- REC indicator (red dot + text) ---
+        self.rec_label = QLabel("● REC")
+        self.rec_label.setObjectName("rec_indicator")
+        self.rec_label.setFixedWidth(60)
+        layout.addWidget(self.rec_label)
+
+        # --- Transcript display area ---
+        # Uses a QLabel instead of QTextEdit for simplicity.
+        # QLabel with word wrap disabled acts as a single-line ticker.
+        # We show the last 2-3 lines of transcript, with older text fading.
+        self.transcript_label = QLabel("")
+        self.transcript_label.setObjectName("compact_transcript")
+        self.transcript_label.setWordWrap(False)
+        # Allow the label to expand to fill available space
+        layout.addWidget(self.transcript_label, stretch=1)
+
+        # --- Stop button ---
+        self.stop_btn = QPushButton("■ Stop")
+        self.stop_btn.setObjectName("stop_btn")
+        self.stop_btn.setFixedWidth(80)
+        self.stop_btn.clicked.connect(self._on_stop_clicked)
+        layout.addWidget(self.stop_btn)
+
+    def _setup_blink_timer(self):
+        """
+        Blink the REC indicator every 800ms to show recording is active.
+        Alternates between visible and hidden red dot.
+        """
+        self._blink_visible = True
+        self._blink_timer = QTimer()
+        self._blink_timer.setInterval(800)
+        self._blink_timer.timeout.connect(self._blink_rec)
+
+    def _blink_rec(self):
+        """Toggle REC indicator visibility."""
+        self._blink_visible = not self._blink_visible
+        if self._blink_visible:
+            self.rec_label.setText("● REC")
+            self.rec_label.setStyleSheet("color: #FF4444;")
+        else:
+            self.rec_label.setText("  REC")
+            self.rec_label.setStyleSheet("color: #888888;")
+
+    # ------------------------------------------
+    # PUBLIC METHODS (called by main window)
+    # ------------------------------------------
+
+    def start_recording(self):
+        """Show the bar and start blinking."""
+        self._transcript_lines.clear()
+        self.transcript_label.setText("")
+        self._blink_timer.start()
+
+        # Enable ghost mode
+        self.show()
+        try:
+            hwnd = int(self.winId())
+            enable_ghost_mode(hwnd)
+        except Exception:
+            pass  # Ghost mode is optional — may fail on non-Windows
+
+    def stop_recording(self):
+        """Hide the bar and stop blinking."""
+        self._blink_timer.stop()
+        self.hide()
+
+    def add_transcript(self, text: str, source: str):
+        """
+        Add a new transcript line to the display.
+
+        Args:
+            text: The transcribed text
+            source: "speaker" or "mic"
+        """
+        if not text or not text.strip():
+            return
+
+        label = "[You]" if source == "mic" else "[Speaker]"
+        self._transcript_lines.append((label, text.strip()))
+
+        # Trim to max lines
+        if len(self._transcript_lines) > self._max_lines:
+            self._transcript_lines = self._transcript_lines[-self._max_lines:]
+
+        # Build display string — show last 2 lines with fade effect
+        # Older line is dimmer (gray), newest line is bright (white)
+        display_parts = []
+        lines_to_show = self._transcript_lines[-2:]
+
+        for i, (lbl, txt) in enumerate(lines_to_show):
+            if i == 0 and len(lines_to_show) > 1:
+                # Older line — faded
+                color = "#666666"
+            else:
+                # Newest line — bright
+                color = "#7EC8E3" if lbl == "[You]" else "#C0C0C0"
+            display_parts.append(f'<span style="color: {color};">{lbl}</span> {txt}')
+
+        self.transcript_label.setText(
+            '<span style="color: #F0F0F0;">  ···  </span>'.join(display_parts)
+        )
+
+    def get_all_transcript_lines(self):
+        """
+        Return all stored transcript lines for the main window to display.
+
+        Returns:
+            List of (label, text) tuples
+        """
+        return list(self._transcript_lines)
+
+    # ------------------------------------------
+    # INTERNAL
+    # ------------------------------------------
+
+    def _on_stop_clicked(self):
+        """Handle Stop button click — emit signal for main window."""
+        self.stop_recording()
+        self.stop_requested.emit()
+
+    # ------------------------------------------
+    # DRAGGABLE (vertical only — snaps to top/bottom)
+    # ------------------------------------------
+
+    def mousePressEvent(self, event):
+        """Record click position for drag."""
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.drag_position = event.globalPosition().toPoint() - self.pos()
+
+    def mouseMoveEvent(self, event):
+        """Move bar vertically during drag."""
+        if self.drag_position and event.buttons() & Qt.MouseButton.LeftButton:
+            new_pos = event.globalPosition().toPoint() - self.drag_position
+            # Constrain to vertical movement only (keep x=0, full width)
+            self.move(0, new_pos.y())
+
+    def mouseReleaseEvent(self, event):
+        """Snap to nearest edge (top or bottom) on release."""
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.drag_position = None
+            # Snap to whichever edge is closer
+            screen = QApplication.primaryScreen().geometry()
+            mid_y = screen.height() // 2
+            current_y = self.pos().y()
+            if current_y < mid_y:
+                self.move(0, 0)  # Snap to top
+            else:
+                self.move(0, screen.height() - self.height())  # Snap to bottom
+
+
+# ============================================
 # ASYNC WORKER — Runs async code from PyQt6
 # ============================================
 # PyQt6 runs its own event loop (for UI).
@@ -214,6 +472,14 @@ class TranscriptionOverlay(QMainWindow):
         # LiveWorker receives connection_manager for health monitoring
         self.live_worker = LiveWorker(self.signals, connection_manager=self.connection)
         self.bulk_worker = BulkWorker(self.signals)
+
+        # --- Compact Recording Bar ---
+        # Separate window shown during live recording. The main window hides
+        # and the compact bar takes over to give a minimal, unobtrusive view.
+        # When Stop is clicked on the compact bar, the main window reappears
+        # with the full transcript ready for copy/save.
+        self.compact_bar = CompactBar()
+        self.compact_bar.stop_requested.connect(self._on_compact_stop)
 
     # ------------------------------------------
     # WINDOW SETUP
@@ -331,7 +597,7 @@ class TranscriptionOverlay(QMainWindow):
         main_layout.addWidget(self.stack)
 
     def _build_live_panel(self) -> QWidget:
-        """Build the Live Mode view — floating transcript display."""
+        """Build the Live Mode view — floating transcript display + export."""
         panel = QWidget()
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 8, 0, 0)
@@ -356,6 +622,25 @@ class TranscriptionOverlay(QMainWindow):
         self.listen_btn = QPushButton("Start Listening")
         self.listen_btn.clicked.connect(self._toggle_listening)
         layout.addWidget(self.listen_btn)
+
+        # --- Export buttons for live transcript ---
+        # Same functionality as bulk mode export. Visible after recording stops
+        # so the user can copy/save what was transcribed during the session.
+        live_export_row = QHBoxLayout()
+
+        live_copy_btn = QPushButton("Copy to Clipboard")
+        live_copy_btn.clicked.connect(self._copy_live_to_clipboard)
+        live_export_row.addWidget(live_copy_btn)
+
+        live_save_txt_btn = QPushButton("Save .txt")
+        live_save_txt_btn.clicked.connect(lambda: self._save_live_transcript("txt"))
+        live_export_row.addWidget(live_save_txt_btn)
+
+        live_save_srt_btn = QPushButton("Save .srt")
+        live_save_srt_btn.clicked.connect(lambda: self._save_live_transcript("srt"))
+        live_export_row.addWidget(live_save_srt_btn)
+
+        layout.addLayout(live_export_row)
 
         return panel
 
@@ -586,25 +871,81 @@ class TranscriptionOverlay(QMainWindow):
     # ------------------------------------------
 
     def _toggle_listening(self):
-        """Start or stop live audio capture and streaming."""
+        """
+        Start or stop live audio capture and streaming.
+
+        Start: hides main window, shows compact bar, begins capture.
+        Stop: called via _on_compact_stop when compact bar's Stop is clicked.
+        Can also be called directly if user clicks "Stop Listening" in main window.
+        """
         if not self.is_live:
+            # --- START RECORDING ---
             self.is_live = True
             self.listen_btn.setText("Stop Listening")
             self.live_text.clear()
             self.model_label.setText("Connecting...")
-            # Start the live pipeline: AudioCapturer → WSS → Server → Text back
+
+            # Hide main window, show compact bar
+            self.hide()
+            self.compact_bar.start_recording()
+
+            # Start the live pipeline: DualCapturer → WSS → Server → Text back
             self.live_worker.start()
         else:
-            self.is_live = False
-            self.listen_btn.setText("Start Listening")
-            self.model_label.setText("Stopped")
-            # Stop capture and disconnect WSS
-            self.live_worker.stop()
+            # --- STOP RECORDING ---
+            self._stop_live()
+
+    def _stop_live(self):
+        """
+        Stop recording and return to full window.
+        Called by both _toggle_listening (Stop button in main window)
+        and _on_compact_stop (Stop button in compact bar).
+        """
+        self.is_live = False
+        self.listen_btn.setText("Start Listening")
+        self.model_label.setText("Stopped")
+
+        # Stop capture and disconnect WSS
+        self.live_worker.stop()
+
+        # Hide compact bar (may already be hidden if called from compact bar)
+        self.compact_bar.stop_recording()
+
+        # Transfer transcript from compact bar to main window's live_text
+        # so the user can see the full transcript and copy/save it
+        lines = self.compact_bar.get_all_transcript_lines()
+        self.live_text.clear()
+        for label, text in lines:
+            if label == "[You]":
+                self.live_text.append(
+                    f'<span style="color: #7EC8E3;">{label}</span> {text}'
+                )
+            elif label == "[Speaker]":
+                self.live_text.append(
+                    f'<span style="color: #C0C0C0;">{label}</span> {text}'
+                )
+            else:
+                self.live_text.append(text)
+
+        # Show main window
+        self.show()
+
+    def _on_compact_stop(self):
+        """
+        Called when the compact bar's Stop button is clicked.
+        Bridges the compact bar's stop_requested signal to _stop_live().
+        """
+        self._stop_live()
 
     def _on_transcript_received(self, text: str, confidence: float,
                                  model: str, fallback: bool, source: str):
         """
         Called when live transcript text arrives from server.
+
+        Feeds transcript to BOTH:
+          1. Compact bar (visible during recording — shows latest lines)
+          2. Main window's live_text (hidden during recording — accumulates
+             full transcript for copy/save when recording stops)
 
         Args:
             text: The transcribed text (already de-duplicated by worker)
@@ -613,19 +954,17 @@ class TranscriptionOverlay(QMainWindow):
             fallback: True if Whisper was used instead of Canary
             source: "speaker" (system audio) or "mic" (your voice)
         """
-        # Label the transcript based on which audio source it came from
-        # "Speaker" = what's playing through your speakers (other people in a call)
-        # "You" = what your microphone picked up (your voice)
+        # Feed to compact bar (updates the visible ticker during recording)
+        self.compact_bar.add_transcript(text, source)
+
+        # Also feed to main window's text area (hidden, accumulating)
         if source == "mic":
             label = "You"
-            # Cyan color for your voice — visually distinct from speaker text
             self.live_text.append(f'<span style="color: #7EC8E3;">[{label}]</span> {text}')
         elif source == "speaker":
             label = "Speaker"
-            # Default light gray for speaker audio
             self.live_text.append(f'<span style="color: #C0C0C0;">[{label}]</span> {text}')
         else:
-            # Unknown source (shouldn't happen, but safe fallback)
             self.live_text.append(text)
 
         fallback_note = " (fallback)" if fallback else ""
@@ -712,6 +1051,57 @@ class TranscriptionOverlay(QMainWindow):
                 f.write(content)
 
             self.bulk_status.setText(f"Saved to {os.path.basename(filepath)}")
+        except Exception as e:
+            self._on_error(f"Save failed: {e}")
+
+    # ------------------------------------------
+    # LIVE EXPORT SUITE
+    # ------------------------------------------
+    # These methods mirror the bulk export methods but operate on
+    # the live_text QTextEdit (which accumulates transcript during
+    # recording and is populated from compact bar on stop).
+
+    def _copy_live_to_clipboard(self):
+        """Copy live transcript to system clipboard."""
+        text = self.live_text.toPlainText()
+        if not text:
+            self._on_error("No transcript to copy")
+            return
+        clipboard = QApplication.clipboard()
+        clipboard.setText(text)
+        self.model_label.setText("Copied to clipboard!")
+
+    def _save_live_transcript(self, format_type: str):
+        """Save live transcript as .txt or .srt file."""
+        text = self.live_text.toPlainText()
+        if not text:
+            self._on_error("No transcript to save")
+            return
+
+        if format_type == "txt":
+            filter_str = "Text Files (*.txt)"
+            default_ext = ".txt"
+        else:
+            filter_str = "Subtitle Files (*.srt)"
+            default_ext = ".srt"
+
+        filepath, _ = QFileDialog.getSaveFileName(
+            self, "Save Live Transcript", f"live_transcript{default_ext}", filter_str
+        )
+
+        if not filepath:
+            return  # User cancelled
+
+        try:
+            if format_type == "srt":
+                content = self._generate_srt(text)
+            else:
+                content = text
+
+            with open(filepath, "w", encoding="utf-8") as f:
+                f.write(content)
+
+            self.model_label.setText(f"Saved to {os.path.basename(filepath)}")
         except Exception as e:
             self._on_error(f"Save failed: {e}")
 
@@ -920,6 +1310,10 @@ class TranscriptionOverlay(QMainWindow):
         if self.is_live:
             self.live_worker.stop()
             self.is_live = False
+
+        # Close compact bar if it's open
+        self.compact_bar.stop_recording()
+        self.compact_bar.close()
 
         # Stop health monitor explicitly in case live mode was never started
         self.connection.stop_health_monitor()

@@ -298,10 +298,17 @@ class LiveWorker:
         # This prevents "Event loop stopped before Future completed" by
         # ensuring every pending recv()/send() Future is resolved (as cancelled)
         # before the loop shuts down.
-        if self.loop and self.loop.is_running():
-            # Schedule task cancellation from the main thread into the loop's thread
-            self.loop.call_soon_threadsafe(self._cancel_all_tasks)
-            self.loop.call_soon_threadsafe(self.loop.stop)
+        #
+        # Entire block wrapped in try/except because the loop may already be
+        # closed or in a bad state. Without this protection, an exception here
+        # crashes the PyQt6 application (the window disappears).
+        try:
+            if self.loop and self.loop.is_running():
+                # Schedule task cancellation from the main thread into the loop's thread
+                self.loop.call_soon_threadsafe(self._cancel_all_tasks)
+                self.loop.call_soon_threadsafe(self.loop.stop)
+        except Exception as e:
+            print(f"[WORKER] Loop shutdown error (non-fatal): {e}")
 
         if self.thread:
             self.thread.join(timeout=3)
@@ -314,9 +321,18 @@ class LiveWorker:
         event loop's thread. asyncio.all_tasks() returns every task that
         hasn't finished yet. Calling task.cancel() on each one injects
         CancelledError into whatever await they're suspended on.
+
+        Wrapped in try/except because this runs during shutdown —
+        the loop may already be closing, or all_tasks() may fail if
+        the loop is in a transitional state. An unhandled exception
+        here would propagate to the UI thread and crash the entire
+        PyQt6 application (which is why the window was closing on Stop).
         """
-        for task in asyncio.all_tasks(self.loop):
-            task.cancel()
+        try:
+            for task in asyncio.all_tasks(self.loop):
+                task.cancel()
+        except Exception as e:
+            print(f"[WORKER] Task cancellation error (non-fatal): {e}")
 
     def _run_pipeline(self):
         """
