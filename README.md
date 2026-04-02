@@ -19,7 +19,7 @@ Captures system audio (speakers) and microphone simultaneously, streams it to a 
 │  │   (WASAPI)   │    │ Dedup +      │    │ - Live panel  │  │
 │  │ - Microphone │    │ Staleness    │    │ - Bulk panel  │  │
 │  │              │    │ guard        │    │ - Ghost mode  │  │
-│  └──────────────┘    └──────┬───────┘    │ - CompactBar  │  │
+│  └──────────────┘    └──────┬───────┘    │ - Rec Panel  │  │
 │                             │            └───────────────┘  │
 │                             │ WebSocket                      │
 │                             │ (audio chunks)                 │
@@ -64,7 +64,7 @@ Captures system audio (speakers) and microphone simultaneously, streams it to a 
 **Client (Desktop Overlay)**
 - Borderless translucent dark-mode overlay, always on top
 - Ghost mode — invisible to screen sharing (Zoom, Teams, OBS) using Windows API `SetWindowDisplayAffinity`
-- Compact recording bar — thin horizontal bar during live recording with auto-scrolling transcript and fade
+- Floating recording panel — dark translucent panel during live recording with scrollable transcript, elapsed timer, and auto-scroll
 - Dual audio capture — system speakers (WASAPI loopback) + microphone simultaneously
 - Live transcript de-duplication with fuzzy matching (SequenceMatcher) and staleness guard
 - Bulk transcription from YouTube URLs via yt-dlp
@@ -120,7 +120,7 @@ transcription-app/
 │   │   ├── connection_manager.py # HPC/DO mode abstraction + health monitor
 │   │   └── cloud_control.py     # DigitalOcean API + heartbeat (DO mode only)
 │   └── ui/
-│       ├── overlay.py           # Main window + CompactBar + ghost mode + export
+│       ├── overlay.py           # Main window + Rec Panel + ghost mode + export
 │       └── workers.py           # Async pipeline: capture → send → dedup → emit
 │
 └── server/                      # Runs on GPU machine (HPC or cloud)
@@ -147,7 +147,7 @@ transcription-app/
 ### Client Setup
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/transcription-app.git
+git clone https://github.com/<your-username>/transcription-app.git
 cd transcription-app
 python -m venv venv
 venv\Scripts\activate
@@ -160,13 +160,13 @@ cp .env.example .env
 
 ```bash
 # One-time setup — creates conda env, installs PyTorch + models
-ssh REDACTED_USER@REDACTED_HOST
+ssh <your-username>@<hpc-login-node>
 bash server/deploy_surrey.sh
 
 # Per-session — submit GPU job
 sbatch server/surrey_job.sh
 # Check which node it landed on:
-squeue -u REDACTED_USER
+squeue -u <your-username>
 # Note the NODELIST value (e.g., gpu-node01)
 ```
 
@@ -174,7 +174,7 @@ squeue -u REDACTED_USER
 
 ```bash
 # 1. On your laptop — create SSH tunnel to GPU node
-ssh -L 8000:<gpu-node>:8000 REDACTED_USER@REDACTED_HOST
+ssh -L 8000:<gpu-node>:8000 <your-username>@<hpc-login-node>
 
 # 2. On your laptop — start the client
 cd transcription-app
