@@ -21,7 +21,7 @@ from datetime import timedelta
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QTextEdit, QLineEdit, QFileDialog,
-    QStackedWidget, QFrame, QMessageBox
+    QStackedWidget, QFrame, QMessageBox, QComboBox, QCheckBox
 )
 from PyQt6.QtCore import Qt, QPoint, pyqtSignal, QObject, QTimer
 from PyQt6.QtGui import QFont, QColor, QPalette, QIcon
@@ -29,6 +29,7 @@ from PyQt6.QtGui import QFont, QColor, QPalette, QIcon
 # Import the async workers that connect audio → network → UI
 from ui.workers import LiveWorker, BulkWorker
 from network.connection_manager import ConnectionManager
+from audio.window_selector import list_windows
 
 
 # ============================================
@@ -178,6 +179,61 @@ STYLESHEET = """
         color: #FF6B6B;
         background-color: rgba(255, 80, 80, 40);
         border-radius: 4px;
+    }
+    QComboBox {
+        background-color: rgba(25, 25, 35, 180);
+        color: #F0F0F0;
+        border: 1px solid rgba(255, 255, 255, 30);
+        border-radius: 6px;
+        padding: 6px 10px;
+        font-size: 12px;
+    }
+    QComboBox:hover {
+        border: 1px solid rgba(100, 150, 255, 100);
+    }
+    QComboBox::drop-down {
+        border: none;
+        width: 20px;
+    }
+    QComboBox::down-arrow {
+        image: none;
+        border-left: 4px solid transparent;
+        border-right: 4px solid transparent;
+        border-top: 6px solid #888888;
+        margin-right: 8px;
+    }
+    QComboBox QAbstractItemView {
+        background-color: rgba(25, 25, 35, 240);
+        color: #F0F0F0;
+        border: 1px solid rgba(100, 150, 255, 100);
+        selection-background-color: rgba(60, 60, 80, 200);
+        padding: 4px;
+    }
+    QCheckBox {
+        color: #E0E0E0;
+        font-size: 12px;
+        spacing: 6px;
+    }
+    QCheckBox::indicator {
+        width: 16px;
+        height: 16px;
+        border: 1px solid rgba(255, 255, 255, 40);
+        border-radius: 3px;
+        background-color: rgba(25, 25, 35, 180);
+    }
+    QCheckBox::indicator:checked {
+        background-color: rgba(50, 100, 180, 200);
+        border: 1px solid rgba(80, 150, 255, 150);
+    }
+    QPushButton#refresh_btn {
+        padding: 6px 10px;
+        font-size: 11px;
+        min-width: 30px;
+    }
+    QLabel#window_section_label {
+        color: #999999;
+        font-size: 11px;
+        font-weight: bold;
     }
 """
 
@@ -734,10 +790,64 @@ class TranscriptionOverlay(QMainWindow):
         main_layout.addWidget(self.stack)
 
     def _build_live_panel(self) -> QWidget:
-        """Build the Live Mode view — floating transcript display + export."""
+        """Build the Live Mode view — window picker + mic toggle + transcript + export."""
         panel = QWidget()
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 8, 0, 0)
+
+        # =============================================
+        # WINDOW PICKER SECTION
+        # =============================================
+        # lets the user choose which app to capture audio from.
+        # "All System Audio" = original mode (no PID filter).
+        # any other item = per-app mode (captures only that app's audio).
+
+        window_label = QLabel("AUDIO SOURCE")
+        window_label.setObjectName("window_section_label")
+        layout.addWidget(window_label)
+
+        # --- Dropdown + Refresh button row ---
+        picker_row = QHBoxLayout()
+
+        self.window_combo = QComboBox()
+        self.window_combo.setMinimumHeight(32)
+        # first item is always "All System Audio" — the original mode
+        self.window_combo.addItem("All System Audio", None)
+        picker_row.addWidget(self.window_combo, stretch=1)
+
+        # refresh button — re-scans open windows
+        # useful when the user opens a new app after launching the overlay
+        refresh_btn = QPushButton("↻")
+        refresh_btn.setObjectName("refresh_btn")
+        refresh_btn.setFixedSize(32, 32)
+        refresh_btn.setToolTip("Refresh window list")
+        refresh_btn.clicked.connect(self._refresh_window_list)
+        picker_row.addWidget(refresh_btn)
+
+        layout.addLayout(picker_row)
+
+        # --- Mic toggle checkbox ---
+        # checked = mic on (meetings, conversations)
+        # unchecked = mic off (solo lectures, playback only)
+        self.mic_checkbox = QCheckBox("Include microphone")
+        self.mic_checkbox.setChecked(True)
+        self.mic_checkbox.setToolTip(
+            "Turn off for solo lectures — only captures app audio, not your voice"
+        )
+        layout.addWidget(self.mic_checkbox)
+
+        # thin separator line between picker section and transcript
+        sep = QFrame()
+        sep.setObjectName("separator")
+        sep.setFrameShape(QFrame.Shape.HLine)
+        layout.addWidget(sep)
+
+        # populate the dropdown with current windows
+        self._refresh_window_list()
+
+        # =============================================
+        # TRANSCRIPT AREA (unchanged from before)
+        # =============================================
 
         # Live transcript display
         self.live_text = QTextEdit()
@@ -745,8 +855,9 @@ class TranscriptionOverlay(QMainWindow):
         self.live_text.setPlaceholderText(
             "Live transcript will appear here...\n\n"
             "1. Start the server\n"
-            "2. Click 'Start Listening' below\n"
-            "3. Play audio through your speakers"
+            "2. Pick a window above (or leave on 'All System Audio')\n"
+            "3. Click 'Start Listening' below\n"
+            "4. Audio from the selected source will be transcribed"
         )
         layout.addWidget(self.live_text)
 
@@ -1004,6 +1115,44 @@ class TranscriptionOverlay(QMainWindow):
         self.bulk_btn.setStyle(self.bulk_btn.style())
 
     # ------------------------------------------
+    # WINDOW PICKER
+    # ------------------------------------------
+
+    def _refresh_window_list(self):
+        """
+        Re-scan all open windows and repopulate the dropdown.
+
+        Called once when the live panel is built, and again each time the
+        user clicks the refresh button. Keeps the first item as
+        "All System Audio" (no PID filter) and adds every real app window
+        after it.
+
+        Each combo item stores a WindowInfo object as its userData.
+        "All System Audio" stores None — DualCapturer treats None as
+        system-wide mode.
+        """
+        # remember what was selected so we can re-select it if still open
+        prev_data = self.window_combo.currentData()
+
+        self.window_combo.clear()
+        self.window_combo.addItem("All System Audio", None)
+
+        try:
+            windows = list_windows()
+            for w in windows:
+                self.window_combo.addItem(w.display_name(), w)
+        except Exception as e:
+            print(f"[UI] Failed to list windows: {e}")
+
+        # try to re-select the previously selected window
+        if prev_data is not None:
+            for i in range(self.window_combo.count()):
+                item_data = self.window_combo.itemData(i)
+                if item_data and item_data.pid == prev_data.pid:
+                    self.window_combo.setCurrentIndex(i)
+                    break
+
+    # ------------------------------------------
     # LIVE MODE CONTROLS
     # ------------------------------------------
 
@@ -1011,7 +1160,13 @@ class TranscriptionOverlay(QMainWindow):
         """
         Start or stop live audio capture and streaming.
 
-        Start: hides main window, shows compact bar, begins capture.
+        Start flow:
+          1. Read the selected window from the dropdown
+          2. Read the mic checkbox state
+          3. Recreate LiveWorker with those settings
+          4. Hide main window, show compact bar
+          5. Start the pipeline
+
         Stop: called via _on_compact_stop when compact bar's Stop is clicked.
         Can also be called directly if user clicks "Stop Listening" in main window.
         """
@@ -1021,6 +1176,26 @@ class TranscriptionOverlay(QMainWindow):
             self.listen_btn.setText("Stop Listening")
             self.live_text.clear()
             self.model_label.setText("Connecting...")
+
+            # --- Read user selections from the UI ---
+            # selected_window is either None (All System Audio) or a WindowInfo object
+            selected_window = self.window_combo.currentData()
+            target_pid = selected_window.pid if selected_window else None
+            enable_mic = self.mic_checkbox.isChecked()
+
+            # store the selected window info — Phase 7C FrameGrabber needs the HWND
+            self._selected_window = selected_window
+
+            # --- Recreate LiveWorker with the selected settings ---
+            # creating a fresh worker each time so the DualCapturer inside
+            # gets the correct target_pid and enable_mic for this session.
+            # reusing an old worker would keep the old PID from a previous session.
+            self.live_worker = LiveWorker(
+                self.signals,
+                connection_manager=self.connection,
+                target_pid=target_pid,
+                enable_mic=enable_mic
+            )
 
             # Hide main window, show compact bar
             self.hide()

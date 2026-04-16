@@ -172,15 +172,26 @@ class LiveWorker:
         - Emits source label with transcript for labeled UI display
     """
 
-    def __init__(self, signals, connection_manager=None):
+    def __init__(self, signals, connection_manager=None,
+                 target_pid=None, enable_mic=True):
         """
         Args:
             signals: AsyncSignals object from the UI for thread-safe communication
             connection_manager: ConnectionManager instance for health monitoring.
                 If None, health monitoring is disabled (transmitter still auto-reconnects).
+            target_pid: Process ID of the app to capture audio from.
+                None = system-wide capture (original mode).
+                An integer = per-app capture via ProcessAudioCapturer.
+            enable_mic: True = capture microphone (meetings/conversations).
+                False = mic off (solo lectures, playback only).
         """
         self.signals = signals
-        self.capturer = DualCapturer()
+        # passing target_pid and enable_mic straight through to DualCapturer.
+        # DualCapturer decides which audio capturer to create based on these.
+        self.capturer = DualCapturer(
+            target_pid=target_pid,
+            enable_mic=enable_mic
+        )
         self.connection_manager = connection_manager
 
         # Pass a status callback to the transmitter so it can report
