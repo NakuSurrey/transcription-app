@@ -12,3 +12,15 @@ aiohttp
 python-dotenv
 numpy
 requests
+
+# === PHASE 7 — Per-App Capture & Frame Grabber ===
+# comtypes: needed to call Windows COM APIs from Python — used by
+#   ProcessAudioCapturer to activate per-process audio loopback
+comtypes
+# pywin32: provides the win32gui / win32process modules — used by
+#   window_selector.py to enumerate windows (ctypes covers most of it
+#   but pywin32 is a safety net for edge cases and future phases)
+pywin32
+# Pillow: image processing library — used by FrameGrabber (Phase 7C)
+#   to capture and resize window screenshots
+Pillow

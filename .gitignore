@@ -76,3 +76,10 @@ dist/
 DEMO_SCRIPT.md
 PHASE_*_REFERENCE.md
 reference_notes_*.md
+
+# ============================================
+# CATEGORY 10: DOCS FOLDER
+# Phase reference files, error logs, build notes
+# — all local-only, never pushed to GitHub
+# ============================================
+docs/
