@@ -1,11 +1,16 @@
 #!/bin/bash
 
-# server/tunnel.sh — SSH Tunnel to HPC cluster GPU Node
-# Run this on YOUR LAPTOP (Windows Git Bash / WSL / Mac terminal)
-# Opens a tunnel so localhost:8000 forwards to the GPU node
+# server/tunnel.sh — SSH tunnel from laptop to HPC GPU node
+# running this on the laptop (Windows Git Bash / WSL / Mac terminal)
+# opens a tunnel so localhost:8000 forwards to the GPU node
 #
-# Usage: bash tunnel.sh gpu-node02
-#        bash tunnel.sh gpu-node01
+# reads login details from env vars — never hardcoded here:
+#   HPC_USER         — your HPC account username
+#   HPC_LOGIN_NODE   — the SSH login node hostname
+#
+# set these in your shell before running, or export from .env
+#
+# Usage: bash tunnel.sh <gpu-node-name>
 #
 # How to find the node name:
 #   1. After running: sbatch surrey_job.sh
@@ -31,8 +36,8 @@ if [ -z "$1" ]; then
     echo "  Example: bash tunnel.sh gpu-node02"
     echo ""
     echo "  How to find the node name:"
-    echo "    1. SSH into REDACTED_HOST"
-    echo "    2. Run: squeue -u REDACTED_USER"
+    echo "    1. SSH into the HPC login node"
+    echo "    2. Run: squeue -u \$HPC_USER"
     echo "    3. Look at the NODELIST column"
     echo "    4. Use that name here"
     echo ""
@@ -45,10 +50,25 @@ GPU_NODE="$1"
 # ============================================
 # CONFIGURATION
 # ============================================
-# These values match your HPC cluster account and server setup
+# login details come from the shell environment — never hardcoded
+# export them once (or source from .env) before running this script:
+#   export HPC_USER=your_hpc_username
+#   export HPC_LOGIN_NODE=your_hpc_login_hostname
 
-SURREY_USER="REDACTED_USER"
-LOGIN_NODE="REDACTED_HOST"
+if [ -z "$HPC_USER" ] || [ -z "$HPC_LOGIN_NODE" ]; then
+    echo "=========================================="
+    echo "  ERROR: HPC credentials not set"
+    echo "=========================================="
+    echo ""
+    echo "  Export these env vars before running:"
+    echo "    export HPC_USER=your_hpc_username"
+    echo "    export HPC_LOGIN_NODE=your_hpc_login_hostname"
+    echo ""
+    echo "  Or source them from your .env file"
+    echo ""
+    exit 1
+fi
+
 LOCAL_PORT=8000
 REMOTE_PORT=8000
 
@@ -71,14 +91,14 @@ REMOTE_PORT=8000
 #      destination_host (gpu-node02) = where traffic should end up
 #      destination_port (8000) = the port on the destination (FastAPI server)
 #
-# The middleman (REDACTED_USER@REDACTED_HOST) = the login node
-# Your laptop can reach the login node (it has a public IP).
-# The login node can reach gpu-node02 (they're on the same internal network).
-# Your laptop CANNOT reach gpu-node02 directly (no public IP).
-# The tunnel chains these two connections together.
+# The middleman (${HPC_USER}@${HPC_LOGIN_NODE}) = the login node
+# the laptop can reach the login node (it has a public IP)
+# the login node can reach the GPU node (internal network)
+# the laptop CANNOT reach the GPU node directly (no public IP)
+# the tunnel chains these two connections together
 #
 # Data flow:
-#   localhost:8000 → [encrypted SSH] → REDACTED_HOST login node → gpu-node02:8000
+#   localhost:8000 → [encrypted SSH] → login node → gpu-nodeXX:8000
 #   Response travels back the same path in reverse
 
 echo "=========================================="
@@ -86,7 +106,7 @@ echo "  SSH TUNNEL — CONNECTING"
 echo "=========================================="
 echo ""
 echo "  Local:   localhost:${LOCAL_PORT}"
-echo "  Through: ${SURREY_USER}@${LOGIN_NODE}"
+echo "  Through: ${HPC_USER}@${HPC_LOGIN_NODE}"
 echo "  To:      ${GPU_NODE}:${REMOTE_PORT}"
 echo ""
 echo "  Your client app connects to: localhost:${LOCAL_PORT}"
@@ -96,4 +116,4 @@ echo "  Press Ctrl+C to close the tunnel"
 echo "=========================================="
 echo ""
 
-ssh -N -L ${LOCAL_PORT}:${GPU_NODE}:${REMOTE_PORT} ${SURREY_USER}@${LOGIN_NODE}
+ssh -N -L ${LOCAL_PORT}:${GPU_NODE}:${REMOTE_PORT} ${HPC_USER}@${HPC_LOGIN_NODE}

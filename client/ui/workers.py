@@ -7,7 +7,7 @@
 #          thread and use Qt signals to send results back to UI.
 #
 # TWO WORKERS:
-#   LiveWorker  — captures audio → streams via WSS → returns text
+#   LiveWorker  — captures audio + frames → streams via WSS → returns text
 #   BulkWorker  — downloads YouTube → uploads via HTTP → returns text
 
 import asyncio
@@ -27,6 +27,7 @@ from audio.capture import DualCapturer
 from audio.youtube import YouTubeExtractor
 from network.transmitter import LiveTransmitter, BulkTransmitter
 from network.connection_manager import ConnectionManager
+from video.frame_grabber import FrameGrabber
 
 
 # ============================================
@@ -172,16 +173,38 @@ class LiveWorker:
         - Emits source label with transcript for labeled UI display
     """
 
-    def __init__(self, signals, connection_manager=None):
+    def __init__(self, signals, connection_manager=None,
+                 target_pid=None, enable_mic=True, target_hwnd=None):
         """
         Args:
             signals: AsyncSignals object from the UI for thread-safe communication
             connection_manager: ConnectionManager instance for health monitoring.
                 If None, health monitoring is disabled (transmitter still auto-reconnects).
+            target_pid: Process ID of the app to capture audio from.
+                None = system-wide capture (original mode).
+                An integer = per-app capture via ProcessAudioCapturer.
+            enable_mic: True = capture microphone (meetings/conversations).
+                False = mic off (solo lectures, playback only).
+            target_hwnd: Windows handle (HWND) of the target window.
+                None = system-wide mode, no frame capture.
+                An integer = FrameGrabber screenshots this window every second.
+                Used by the future vision pipeline (OlmOCR / Qwen-VL).
         """
         self.signals = signals
-        self.capturer = DualCapturer()
+        # passing target_pid and enable_mic straight through to DualCapturer.
+        # DualCapturer decides which audio capturer to create based on these.
+        self.capturer = DualCapturer(
+            target_pid=target_pid,
+            enable_mic=enable_mic
+        )
         self.connection_manager = connection_manager
+
+        # --- Frame Grabber (Phase 7C) ---
+        # captures screenshots of the target window once per second.
+        # only active when a specific window is selected (target_hwnd is not None).
+        # in "All System Audio" mode, hwnd is None and FrameGrabber skips capture.
+        # frames are stored in memory as (timestamp, PIL.Image) tuples.
+        self.frame_grabber = FrameGrabber(hwnd=target_hwnd)
 
         # Pass a status callback to the transmitter so it can report
         # reconnection events back to the UI via our signals object
@@ -263,6 +286,12 @@ class LiveWorker:
         self.thread = threading.Thread(target=self._run_pipeline, daemon=True)
         self.thread.start()
 
+        # Start frame capture alongside audio capture.
+        # FrameGrabber.start() checks hwnd internally — if hwnd is None
+        # (system-wide mode), it prints a message and returns immediately.
+        # no need for an if-check here.
+        self.frame_grabber.start()
+
         # Start health monitoring alongside the pipeline
         if self.connection_manager:
             self.connection_manager.start_health_monitor(
@@ -293,6 +322,12 @@ class LiveWorker:
 
         # Stop the dual capturer (stops both speaker + mic)
         self.capturer.stop()
+
+        # Stop frame capture — FrameGrabber.stop() is safe to call
+        # even if it was never started (hwnd was None). Frames stay
+        # in memory until clear_frames() is called — the vision
+        # pipeline may need them after recording stops.
+        self.frame_grabber.stop()
 
         # Graceful asyncio shutdown: cancel pending tasks BEFORE stopping loop
         # This prevents "Event loop stopped before Future completed" by

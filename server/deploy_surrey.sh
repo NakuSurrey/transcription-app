@@ -1,14 +1,14 @@
 #!/bin/bash
 set -e
 
-# server/deploy_surrey.sh — One-Time HPC cluster Environment Setup
-# Run this ONCE on the login node (REDACTED_HOST)
-# Creates conda environment, installs all dependencies, downloads AI models
+# server/deploy_surrey.sh — one-time HPC environment setup
+# run this ONCE on the HPC login node
+# creates conda environment, installs all dependencies, downloads AI models
 #
 # Usage: bash deploy_surrey.sh
 
 echo "=========================================="
-echo "  HPC CLUSTER — ONE-TIME ENVIRONMENT SETUP"
+echo "  HPC — ONE-TIME ENVIRONMENT SETUP"
 echo "=========================================="
 
 # ============================================

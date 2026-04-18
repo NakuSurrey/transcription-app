@@ -181,7 +181,7 @@ class ConnectionManager:
             return {
                 "success": False,
                 "message": "HPC Mode — Start the server manually:\n"
-                           "1. SSH into REDACTED_HOST\n"
+                           "1. SSH into the HPC login node\n"
                            "2. Run: sbatch server/surrey_job.sh\n"
                            "3. Run tunnel.sh from your laptop"
             }
