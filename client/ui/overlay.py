@@ -1190,11 +1190,18 @@ class TranscriptionOverlay(QMainWindow):
             # creating a fresh worker each time so the DualCapturer inside
             # gets the correct target_pid and enable_mic for this session.
             # reusing an old worker would keep the old PID from a previous session.
+            #
+            # target_hwnd: passed to FrameGrabber (Phase 7C) so it knows which
+            # window to screenshot. None when "All System Audio" is selected —
+            # FrameGrabber detects this and skips capture automatically.
+            target_hwnd = selected_window.hwnd if selected_window else None
+
             self.live_worker = LiveWorker(
                 self.signals,
                 connection_manager=self.connection,
                 target_pid=target_pid,
-                enable_mic=enable_mic
+                enable_mic=enable_mic,
+                target_hwnd=target_hwnd
             )
 
             # Hide main window, show compact bar
