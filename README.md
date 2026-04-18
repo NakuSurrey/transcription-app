@@ -57,7 +57,7 @@ Each build phase adds one working layer — audio capture first, then network tr
 | Server Framework  | FastAPI + Uvicorn                  | Async WebSocket + HTTP endpoints in one app, clean ASGI lifecycle               |
 | Live Transport    | websockets                         | Persistent bidirectional connection with built-in ping/pong keepalive           |
 | Network           | SSH tunnel                         | No inbound ports opened on the HPC cluster — safe multi-user environment        |
-| GPU Compute       | NVIDIA A100 (MIG 3g.40gb)          | Large enough for Whisper Large-v3 at fp16, scheduled via HPC cluster Slurm       |
+| GPU Compute       | NVIDIA A100 (MIG 3g.40gb)          | Large enough for Whisper Large-v3 at fp16, scheduled via HPC Slurm cluster      |
 | Tests             | unittest (stdlib)                  | Zero install, cross-platform where possible, runs with `python -m unittest`     |
 
 ---
@@ -142,9 +142,14 @@ copy .env.example .env
 
 Edit `.env` in any text editor. Every variable is listed in `.env.example` with a placeholder. At minimum you need:
 
-- `SERVER_HOST` — the tunnel endpoint (usually `localhost` with SSH tunnel)
+- `SERVER_IP` — the tunnel endpoint (usually `localhost` with SSH tunnel)
 - `SERVER_PORT` — default `8000`
-- `DEPLOYMENT_MODE` — `hpc` or `digitalocean`
+- `SERVER_MODE` — `hpc` or `digitalocean`
+
+If `SERVER_MODE=hpc`, also set:
+
+- `HPC_USER` — your HPC username
+- `HPC_LOGIN_NODE` — the SSH login node hostname
 
 ### 3. Install client dependencies
 
@@ -156,21 +161,22 @@ pip install -r requirements.txt
 
 ### 4. Set up the server
 
-On the HPC login node:
+On the HPC login node (SSH in using your own credentials):
 
 ```
-ssh <your-username>@<hpc-login-node>
 bash server/deploy_surrey.sh     # one-time setup
 sbatch server/surrey_job.sh      # per session — submits GPU job
-squeue -u <your-username>        # check which node it landed on
+squeue -u $USER                  # check which node it landed on
 ```
 
 ### 5. Open the SSH tunnel
 
-On your laptop:
+On your laptop, export the HPC vars and run the tunnel helper:
 
 ```
-ssh -L 8000:<gpu-node>:8000 <your-username>@<hpc-login-node>
+export HPC_USER=your_hpc_username
+export HPC_LOGIN_NODE=your_hpc_login_hostname
+bash server/tunnel.sh <gpu-node-from-squeue>
 ```
 
 ### 6. Run the client

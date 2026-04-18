@@ -1,11 +1,11 @@
 #!/bin/bash
 
-# server/surrey_job.sh — Slurm Job Script for HPC cluster
-# Submit this to start a transcription server session on a GPU node
+# server/surrey_job.sh — Slurm job script for a HPC GPU node
+# submits a transcription server session on the scheduler
 #
-# Usage: sbatch surrey_job.sh
-# Check status: squeue -u REDACTED_USER
-# Cancel job: scancel <job_id>
+# Usage:        sbatch surrey_job.sh
+# Check status: squeue -u $HPC_USER
+# Cancel job:   scancel <job_id>
 
 # ============================================
 # SBATCH DIRECTIVES — Instructions to Slurm
@@ -114,7 +114,8 @@ echo "=========================================="
 echo "  Server will start on: $HOSTNAME:8000"
 echo ""
 echo "  To connect from your laptop, open a NEW terminal and run:"
-echo "  ssh -L 8000:$HOSTNAME:8000 REDACTED_USER@REDACTED_HOST"
+echo "  ssh -L 8000:\$HOSTNAME:8000 \$HPC_USER@\$HPC_LOGIN_NODE"
+echo "  (HOSTNAME prints above — export HPC_USER and HPC_LOGIN_NODE on the laptop)"
 echo ""
 echo "  Then point your client to: localhost:8000"
 echo "=========================================="
