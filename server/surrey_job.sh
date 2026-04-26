@@ -101,19 +101,23 @@ echo "[INFO] PyTorch CUDA: $(python -c 'import torch; print(torch.cuda.is_availa
 echo "[INFO] Working directory: $(pwd)"
 
 # ============================================
-# TMPDIR — pin temp extractions to the GPU node's local disk
+# TMPDIR — pin temp extractions to /scratch on the GPU node
 # ============================================
 # canary's .nemo archive unpacks into a tempfile.TemporaryDirectory during
-# model load. without TMPDIR set, NeMo lands in /tmp — and on this cluster
-# /tmp behaviour is unpredictable per node, plus Anaconda sometimes
-# redirects TMPDIR to live inside $HOME. session 26 hit "No space left on
-# device" mid-extract because the home quota was the bottleneck. pinning
-# TMPDIR to a per-job folder on /tmp guarantees the unpack uses the GPU
-# node's local disk (usually 100+ GB free) and never touches the home quota.
-export TMPDIR="/tmp/${USER}_${SLURM_JOB_ID}"
+# model load. session 26 caught two cascading versions of the same bug:
+#   - first try with TMPDIR unset → NeMo wrote into $HOME (4.6 GB free)
+#     and crashed with "No space left on device".
+#   - second try pinning TMPDIR to /tmp/<user>_<jobid> → still crashed,
+#     because /tmp on each GPU node is shared system disk currently at
+#     98% used, only ~1.9 GB free — way under the ~5 GB Canary needs.
+# the right target is /scratch — a near-empty 894 GB local disk on every
+# GPU node (~888 GB free, 1% used). plenty of room for the unpack and
+# anything else NeMo or PyTorch caches during a session.
+export TMPDIR="/scratch/${USER}/${SLURM_JOB_ID}"
 mkdir -p "$TMPDIR"
-# clean the dir up when the job exits — Slurm usually wipes /tmp anyway,
-# but the trap makes the cleanup deterministic
+# clean the dir up when the job exits — /scratch persists between jobs
+# unless we explicitly delete, so the trap stops old per-job folders from
+# piling up and gradually filling the disk
 trap 'rm -rf "$TMPDIR"' EXIT
 echo "[INFO] TMPDIR: $TMPDIR ($(df -h "$TMPDIR" 2>/dev/null | tail -1 | awk '{print $4}') free)"
 
