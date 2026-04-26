@@ -101,6 +101,58 @@ echo "[INFO] PyTorch CUDA: $(python -c 'import torch; print(torch.cuda.is_availa
 echo "[INFO] Working directory: $(pwd)"
 
 # ============================================
+# TMPDIR — pin temp extractions to the GPU node's local disk
+# ============================================
+# canary's .nemo archive unpacks into a tempfile.TemporaryDirectory during
+# model load. without TMPDIR set, NeMo lands in /tmp — and on this cluster
+# /tmp behaviour is unpredictable per node, plus Anaconda sometimes
+# redirects TMPDIR to live inside $HOME. session 26 hit "No space left on
+# device" mid-extract because the home quota was the bottleneck. pinning
+# TMPDIR to a per-job folder on /tmp guarantees the unpack uses the GPU
+# node's local disk (usually 100+ GB free) and never touches the home quota.
+export TMPDIR="/tmp/${USER}_${SLURM_JOB_ID}"
+mkdir -p "$TMPDIR"
+# clean the dir up when the job exits — Slurm usually wipes /tmp anyway,
+# but the trap makes the cleanup deterministic
+trap 'rm -rf "$TMPDIR"' EXIT
+echo "[INFO] TMPDIR: $TMPDIR ($(df -h "$TMPDIR" 2>/dev/null | tail -1 | awk '{print $4}') free)"
+
+# ============================================
+# PHASE 7D — Ensure Tesseract is on PATH
+# ============================================
+# The /vision/ocr endpoint needs the Tesseract binary. HPC nodes
+# usually do not give us sudo / apt, so the reliable path is:
+#
+#   1. Try the HPC's module system first (free, cached, fast).
+#   2. If no module exists, install tesseract into the active conda
+#      env (conda-forge has a prebuilt binary — no compilation needed).
+#
+# Either way the binary ends up on $PATH before uvicorn starts, so
+# pytesseract can call it. If BOTH paths fail, the server still
+# boots — the OCR endpoint just returns 503 until tesseract is
+# installed. Audio transcription keeps working regardless.
+
+if ! command -v tesseract >/dev/null 2>&1; then
+    echo "[VISION] tesseract not found — trying module load..."
+    module load tesseract 2>/dev/null || module load Tesseract 2>/dev/null || true
+
+    if ! command -v tesseract >/dev/null 2>&1; then
+        echo "[VISION] no tesseract module — installing via conda-forge..."
+        # -y auto-accepts, --quiet cuts log noise. conda-forge has a
+        # precompiled tesseract package so this takes ~30-60 seconds
+        # the first time and is cached for later runs.
+        conda install -c conda-forge tesseract --yes --quiet || \
+            echo "[VISION] WARNING — tesseract install failed; OCR will return 503"
+    fi
+fi
+
+if command -v tesseract >/dev/null 2>&1; then
+    echo "[VISION] tesseract ready: $(tesseract --version 2>&1 | head -n 1)"
+else
+    echo "[VISION] tesseract NOT available — /vision/ocr will return 503"
+fi
+
+# ============================================
 # PRINT CONNECTION INFO
 # ============================================
 # This is critical — it tells you which node to tunnel to.
