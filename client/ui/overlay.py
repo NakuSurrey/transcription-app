@@ -1784,6 +1784,14 @@ class TranscriptionOverlay(QMainWindow):
         print("[APP] Shutdown complete")
         event.accept()
 
+        # force-terminate the interpreter — PortAudio / comtypes / asyncio
+        # spawn native (non-Python) threads that do not honour daemon=True,
+        # so a clean sys.exit() can leave python.exe alive in the background.
+        # os._exit skips Python finalisers and tells the OS to kill the
+        # process immediately. safe here because all our state is already
+        # flushed (above) and there are no unfinished writes to disk.
+        os._exit(0)
+
 
 # ============================================
 # APPLICATION ENTRY POINT
