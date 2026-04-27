@@ -85,8 +85,12 @@ def disable_ghost_mode(window_handle):
 # All colors use RGBA where A (alpha) < 255 = translucent.
 
 STYLESHEET = """
+    /* solid dark background — no translucency, behaves like a regular Windows app */
     QMainWindow {
-        background-color: rgba(15, 15, 20, 200);
+        background-color: #1a1a22;
+    }
+    QWidget {
+        color: #E8E8E8;
     }
     QLabel {
         color: #E8E8E8;
@@ -98,98 +102,151 @@ STYLESHEET = """
         font-weight: bold;
     }
     QLabel#status {
-        color: #888888;
+        color: #9aa0a6;
         font-size: 11px;
     }
     QTextEdit {
-        background-color: rgba(25, 25, 35, 180);
+        background-color: #14141c;
         color: #F0F0F0;
-        border: 1px solid rgba(255, 255, 255, 30);
+        border: 1px solid #2a2a36;
         border-radius: 8px;
         padding: 10px;
         font-size: 14px;
         font-family: 'Segoe UI', 'Consolas', monospace;
+        selection-background-color: #3b5fff;
     }
     QLineEdit {
-        background-color: rgba(25, 25, 35, 180);
+        background-color: #14141c;
         color: #F0F0F0;
-        border: 1px solid rgba(255, 255, 255, 30);
+        border: 1px solid #2a2a36;
         border-radius: 6px;
         padding: 8px 12px;
         font-size: 13px;
     }
     QLineEdit:focus {
-        border: 1px solid rgba(100, 150, 255, 150);
+        border: 1px solid #5a8aff;
     }
+
+    /* base button — gradient + raised top edge so it feels physical */
     QPushButton {
-        background-color: rgba(60, 60, 80, 200);
-        color: #E0E0E0;
-        border: 1px solid rgba(255, 255, 255, 20);
+        background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                    stop:0 #3a3a48, stop:1 #2a2a36);
+        color: #F0F0F0;
+        border: 1px solid #14141c;
+        border-top: 1px solid #4a4a58;
         border-radius: 6px;
         padding: 8px 16px;
         font-size: 12px;
         font-weight: bold;
     }
     QPushButton:hover {
-        background-color: rgba(80, 80, 110, 220);
-        border: 1px solid rgba(100, 150, 255, 100);
+        background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                    stop:0 #4a4a58, stop:1 #3a3a48);
+        border: 1px solid #5a8aff;
+        border-top: 1px solid #6a9aff;
     }
     QPushButton:pressed {
-        background-color: rgba(40, 40, 60, 220);
+        background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                    stop:0 #2a2a36, stop:1 #3a3a48);
+        border: 1px solid #14141c;
+        padding-top: 9px;
+        padding-bottom: 7px;
     }
+    QPushButton:focus {
+        outline: none;
+    }
+    QPushButton:disabled {
+        background: #2a2a36;
+        color: #555555;
+        border: 1px solid #14141c;
+    }
+
     QPushButton#server_on {
-        background-color: rgba(30, 120, 60, 200);
-        border: 1px solid rgba(50, 200, 100, 100);
+        background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                    stop:0 #2a8a4a, stop:1 #1a6a3a);
+        color: #FFFFFF;
+        border: 1px solid #1a4a2a;
+        border-top: 1px solid #4aaa6a;
     }
+    QPushButton#server_on:hover {
+        background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                    stop:0 #3a9a5a, stop:1 #2a7a4a);
+        border: 1px solid #5aba7a;
+    }
+
     QPushButton#server_off {
-        background-color: rgba(120, 30, 30, 200);
-        border: 1px solid rgba(200, 50, 50, 100);
+        background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                    stop:0 #aa3a3a, stop:1 #8a2a2a);
+        color: #FFFFFF;
+        border: 1px solid #6a1a1a;
+        border-top: 1px solid #ca5a5a;
     }
+    QPushButton#server_off:hover {
+        background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                    stop:0 #ba4a4a, stop:1 #9a3a3a);
+        border: 1px solid #da6a6a;
+    }
+
     QPushButton#mode_active {
-        background-color: rgba(50, 100, 180, 200);
-        border: 1px solid rgba(80, 150, 255, 150);
+        background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                    stop:0 #4a7adf, stop:1 #3a5acf);
+        color: #FFFFFF;
+        border: 1px solid #2a4abf;
+        border-top: 1px solid #6a9aff;
     }
+    QPushButton#mode_active:hover {
+        background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                    stop:0 #5a8aff, stop:1 #4a6adf);
+    }
+
+    /* ghost-on variant — purple tint when invisible-to-capture is active */
+    QPushButton#ghost_on {
+        background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                    stop:0 #6a4ada, stop:1 #4a2aba);
+        color: #FFFFFF;
+        border: 1px solid #3a1aaa;
+        border-top: 1px solid #8a6afa;
+    }
+    QPushButton#ghost_on:hover {
+        background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                    stop:0 #7a5aea, stop:1 #5a3aca);
+        border: 1px solid #9a7afa;
+    }
+
+    /* primary action — Start Listening / Transcribe — stand-out blue */
+    QPushButton#primary_action {
+        background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                    stop:0 #4a7aff, stop:1 #2a5aef);
+        color: #FFFFFF;
+        border: 1px solid #1a3acf;
+        border-top: 1px solid #6a9aff;
+        font-size: 13px;
+        padding: 10px 16px;
+    }
+    QPushButton#primary_action:hover {
+        background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                    stop:0 #5a8aff, stop:1 #3a6aff);
+    }
+    QPushButton#primary_action:pressed {
+        background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                    stop:0 #2a5aef, stop:1 #4a7aff);
+    }
+
     QFrame#separator {
-        background-color: rgba(255, 255, 255, 20);
+        background-color: #2a2a36;
         max-height: 1px;
     }
-    QWidget#title_bar {
-        background-color: rgba(30, 30, 40, 220);
-        border-top-left-radius: 8px;
-        border-top-right-radius: 8px;
-    }
-    QLabel#grip {
-        color: #555555;
-        font-size: 14px;
-    }
-    QLabel#title_bar_text {
-        color: #CCCCCC;
-        font-size: 12px;
-        font-weight: bold;
-    }
-    QPushButton#title_close {
-        background-color: transparent;
-        color: #888888;
-        border: none;
-        font-size: 14px;
-        font-weight: bold;
-        padding: 2px 8px;
-    }
-    QPushButton#title_close:hover {
-        color: #FF6B6B;
-        background-color: rgba(255, 80, 80, 40);
-        border-radius: 4px;
-    }
+
     QComboBox {
-        background-color: rgba(25, 25, 35, 180);
+        background-color: #14141c;
         color: #F0F0F0;
-        border: 1px solid rgba(255, 255, 255, 30);
+        border: 1px solid #2a2a36;
         border-radius: 6px;
         padding: 6px 10px;
         font-size: 12px;
     }
     QComboBox:hover {
-        border: 1px solid rgba(100, 150, 255, 100);
+        border: 1px solid #5a8aff;
     }
     QComboBox::drop-down {
         border: none;
@@ -203,12 +260,13 @@ STYLESHEET = """
         margin-right: 8px;
     }
     QComboBox QAbstractItemView {
-        background-color: rgba(25, 25, 35, 240);
+        background-color: #14141c;
         color: #F0F0F0;
-        border: 1px solid rgba(100, 150, 255, 100);
-        selection-background-color: rgba(60, 60, 80, 200);
+        border: 1px solid #5a8aff;
+        selection-background-color: #3a3a48;
         padding: 4px;
     }
+
     QCheckBox {
         color: #E0E0E0;
         font-size: 12px;
@@ -217,14 +275,15 @@ STYLESHEET = """
     QCheckBox::indicator {
         width: 16px;
         height: 16px;
-        border: 1px solid rgba(255, 255, 255, 40);
+        border: 1px solid #3a3a48;
         border-radius: 3px;
-        background-color: rgba(25, 25, 35, 180);
+        background-color: #14141c;
     }
     QCheckBox::indicator:checked {
-        background-color: rgba(50, 100, 180, 200);
-        border: 1px solid rgba(80, 150, 255, 150);
+        background-color: #3a5acf;
+        border: 1px solid #5a8aff;
     }
+
     QPushButton#refresh_btn {
         padding: 6px 10px;
         font-size: 11px;
@@ -234,6 +293,26 @@ STYLESHEET = """
         color: #999999;
         font-size: 11px;
         font-weight: bold;
+        letter-spacing: 0.5px;
+    }
+
+    /* slim modern scrollbars — match the dark theme */
+    QScrollBar:vertical {
+        background-color: #1a1a22;
+        width: 10px;
+        border: none;
+        border-radius: 5px;
+    }
+    QScrollBar::handle:vertical {
+        background-color: #3a3a48;
+        border-radius: 5px;
+        min-height: 30px;
+    }
+    QScrollBar::handle:vertical:hover {
+        background-color: #4a4a58;
+    }
+    QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+        height: 0px;
     }
 """
 
@@ -528,21 +607,35 @@ class CompactBar(QMainWindow):
 
         Args:
             text: The transcribed text
-            source: "speaker" or "mic"
+            source: "speaker", "mic", or "visual"
+                "visual" = text read off the target window via OCR (Phase 7D).
+                shown in a different color so the user can tell at a glance
+                that it came from pixels, not audio.
         """
         if not text or not text.strip():
             return
 
-        label = "[You]" if source == "mic" else "[Speaker]"
+        # pick the label for this source. visual lines use [Visual] so they
+        # sit distinctly next to the audio ones in the same ticker.
+        if source == "mic":
+            label = "[You]"
+        elif source == "visual":
+            label = "[Visual]"
+        else:
+            label = "[Speaker]"
+
         self._transcript_lines.append((label, text.strip()))
 
         # Trim stored lines (memory safety)
         if len(self._transcript_lines) > self._max_lines:
             self._transcript_lines = self._transcript_lines[-self._max_lines:]
 
-        # Color code by source: blue for You, light gray for Speaker
+        # Color code by source. Green for visual so the eye separates it
+        # from the blue (you) and gray (speaker) audio lines.
         if source == "mic":
             color = "#7EC8E3"
+        elif source == "visual":
+            color = "#77DD77"
         else:
             color = "#C0C0C0"
 
@@ -616,6 +709,13 @@ class AsyncSignals(QObject):
     #     message (str): human-readable description for the UI
     connection_event = pyqtSignal(str, str)
 
+    # --- Phase 7D: Visual pipeline signal ---
+    # visual_text_received: text that Tesseract OCR extracted from one frame.
+    #   single-argument signal — the UI handler wraps it in a "[Visual]" line.
+    #   empty strings are filtered out upstream in workers.py so the UI only
+    #   receives meaningful text.
+    visual_text_received = pyqtSignal(str)
+
 
 # ============================================
 # MAIN WINDOW — The Stealth Overlay
@@ -632,7 +732,7 @@ class TranscriptionOverlay(QMainWindow):
         self.signals = AsyncSignals()
         self.ghost_enabled = False
         self.is_live = False
-        self.drag_position = None
+        # native frame handles drag — no manual drag_position tracking
 
         # Transcript storage for export
         self.current_transcript = ""
@@ -664,20 +764,18 @@ class TranscriptionOverlay(QMainWindow):
     # ------------------------------------------
 
     def _setup_window(self):
-        """Configure the borderless, translucent, always-on-top window."""
+        """Configure as a normal Windows window — native frame, min/max/close, resizable."""
         self.setWindowTitle("Transcription")
-        self.setFixedSize(480, 620)
+        # initial size — comfortable default; user can resize freely
+        self.resize(520, 680)
+        # minimum so layout never collapses awkwardly
+        self.setMinimumSize(420, 560)
 
-        # FramelessWindowHint — removes title bar, min/max/close buttons
-        # WindowStaysOnTopHint — overlay floats above all other windows
-        # WA_TranslucentBackground — allows rgba alpha transparency
-        self.setWindowFlags(
-            Qt.WindowType.FramelessWindowHint |
-            Qt.WindowType.WindowStaysOnTopHint
-        )
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        # native frame: Windows draws title bar with min/max/close + drag/resize.
+        # no FramelessWindowHint, no WindowStaysOnTopHint, no WA_TranslucentBackground —
+        # this app behaves like any regular desktop app now.
 
-        # Apply the dark stylesheet
+        # apply the dark stylesheet (solid, no translucency)
         self.setStyleSheet(STYLESHEET)
 
     # ------------------------------------------
@@ -686,61 +784,23 @@ class TranscriptionOverlay(QMainWindow):
 
     def _build_ui(self):
         """Construct all UI elements."""
-        # Central widget — everything goes inside this
+        # central widget — everything goes inside this
         central = QWidget()
         self.setCentralWidget(central)
         main_layout = QVBoxLayout(central)
         main_layout.setContentsMargins(16, 12, 16, 12)
-        main_layout.setSpacing(8)
+        main_layout.setSpacing(10)
 
-        # --- CUSTOM TITLE BAR ---
-        # A distinct strip at the top with grip icon, title, and close button.
-        # Visually separates the "grab here" area from the content below.
-        # QWidget container gives it its own background color via stylesheet.
-        title_bar = QWidget()
-        title_bar.setObjectName("title_bar")
-        title_bar.setFixedHeight(32)
-        title_bar_layout = QHBoxLayout(title_bar)
-        title_bar_layout.setContentsMargins(10, 4, 10, 4)
-        title_bar_layout.setSpacing(8)
-
-        # Grip icon — universal drag indicator (six-dot braille pattern)
-        grip = QLabel("⠿")
-        grip.setObjectName("grip")
-        title_bar_layout.addWidget(grip)
-
-        # Title text
-        title_text = QLabel("Transcription")
-        title_text.setObjectName("title_bar_text")
-        title_bar_layout.addWidget(title_text)
-
-        title_bar_layout.addStretch()
-
-        # Ghost toggle button
-        self.ghost_btn = QPushButton("Ghost: OFF")
-        self.ghost_btn.setFixedWidth(100)
-        self.ghost_btn.clicked.connect(self._toggle_ghost)
-        title_bar_layout.addWidget(self.ghost_btn)
-
-        # Close button
-        close_btn = QPushButton("✕")
-        close_btn.setObjectName("title_close")
-        close_btn.setFixedSize(24, 24)
-        close_btn.clicked.connect(self.close)
-        title_bar_layout.addWidget(close_btn)
-
-        main_layout.addWidget(title_bar)
-
-        # --- SEPARATOR ---
-        sep = QFrame()
-        sep.setObjectName("separator")
-        sep.setFrameShape(QFrame.Shape.HLine)
-        main_layout.addWidget(sep)
+        # native Windows title bar handles min/max/close + drag now.
+        # no custom title bar widget needed — keeps the app feel like
+        # any other regular desktop application.
 
         # --- SERVER STATUS BAR ---
+        # holds: status label (left) | Ghost button | Check Connection (right)
         server_bar = QHBoxLayout()
+        server_bar.setSpacing(8)
 
-        # Initial label depends on server mode (HPC vs DigitalOcean)
+        # initial label depends on server mode (HPC vs DigitalOcean)
         if self.connection.is_hpc_mode():
             self.server_status_label = QLabel("Server: HPC Mode")
         else:
@@ -750,8 +810,16 @@ class TranscriptionOverlay(QMainWindow):
 
         server_bar.addStretch()
 
-        # Button label depends on mode:
-        #   HPC: "Check Connection" (only checks if tunnel + server are reachable)
+        # ghost toggle — moved here from the old custom title bar.
+        # default OFF — app behaves like a normal window unless user enables.
+        self.ghost_btn = QPushButton("Ghost: OFF")
+        self.ghost_btn.setFixedWidth(100)
+        self.ghost_btn.setToolTip("Hide this window from screen-capture software (Zoom / Teams / OBS)")
+        self.ghost_btn.clicked.connect(self._toggle_ghost)
+        server_bar.addWidget(self.ghost_btn)
+
+        # button label depends on mode:
+        #   HPC: "Check Connection" (only pings /health)
         #   DigitalOcean: "Start Server" (controls droplet power)
         initial_btn_label = self.connection.get_button_label(is_available=False)
         self.server_btn = QPushButton(initial_btn_label)
@@ -836,6 +904,22 @@ class TranscriptionOverlay(QMainWindow):
         )
         layout.addWidget(self.mic_checkbox)
 
+        # --- OCR toggle checkbox (Phase 7D) ---
+        # checked = FrameGrabber screenshots the target window every second and
+        #   Tesseract OCR pulls out any visible text. useful for slides, code
+        #   editors, and chat windows where the speaker shows text but never
+        #   reads it out loud.
+        # unchecked = frames are still captured in memory (cheap) but never
+        #   uploaded. good default — most users only want audio.
+        # only works when a real window is selected; disabled in "All System Audio" mode.
+        self.ocr_checkbox = QCheckBox("Show on-screen text")
+        self.ocr_checkbox.setChecked(False)
+        self.ocr_checkbox.setToolTip(
+            "Runs OCR on the selected window every second and shows extracted text "
+            "as [Visual] lines. Needs a specific window — off in 'All System Audio' mode."
+        )
+        layout.addWidget(self.ocr_checkbox)
+
         # thin separator line between picker section and transcript
         sep = QFrame()
         sep.setObjectName("separator")
@@ -868,6 +952,8 @@ class TranscriptionOverlay(QMainWindow):
 
         # Start/Stop listening button
         self.listen_btn = QPushButton("Start Listening")
+        self.listen_btn.setObjectName("primary_action")
+        self.listen_btn.setMinimumHeight(38)
         self.listen_btn.clicked.connect(self._toggle_listening)
         layout.addWidget(self.listen_btn)
 
@@ -905,7 +991,9 @@ class TranscriptionOverlay(QMainWindow):
         url_row.addWidget(self.url_input)
 
         self.download_btn = QPushButton("Transcribe")
-        self.download_btn.setFixedWidth(100)
+        self.download_btn.setObjectName("primary_action")
+        self.download_btn.setFixedWidth(110)
+        self.download_btn.setMinimumHeight(34)
         self.download_btn.clicked.connect(self._start_bulk_transcription)
         url_row.addWidget(self.download_btn)
 
@@ -953,6 +1041,9 @@ class TranscriptionOverlay(QMainWindow):
         self.signals.error.connect(self._on_error)
         self.signals.download_progress.connect(self._on_download_progress)
         self.signals.connection_event.connect(self._on_connection_event)
+        # Phase 7D — OCR drain loop emits this from workers.py whenever a
+        # frame yields non-empty text. handler below renders it as [Visual].
+        self.signals.visual_text_received.connect(self._on_visual_text_received)
 
     # ------------------------------------------
     # GHOST MODE
@@ -960,16 +1051,24 @@ class TranscriptionOverlay(QMainWindow):
 
     def _toggle_ghost(self):
         """Toggle screen capture invisibility on/off."""
-        hwnd = int(self.winId())  # Get the Windows handle for this window
+        hwnd = int(self.winId())  # the Windows HWND for this window
 
         if self.ghost_enabled:
             disable_ghost_mode(hwnd)
             self.ghost_btn.setText("Ghost: OFF")
+            # back to neutral style — clear the ghost_on object name
+            self.ghost_btn.setObjectName("")
             self.ghost_enabled = False
         else:
             enable_ghost_mode(hwnd)
             self.ghost_btn.setText("Ghost: ON")
+            # purple-tinted style flags the active state
+            self.ghost_btn.setObjectName("ghost_on")
             self.ghost_enabled = True
+
+        # restyle so the new objectName takes effect immediately
+        self.ghost_btn.style().unpolish(self.ghost_btn)
+        self.ghost_btn.style().polish(self.ghost_btn)
 
     # ------------------------------------------
     # SERVER CONTROL (Cloud Switch)
@@ -1196,12 +1295,19 @@ class TranscriptionOverlay(QMainWindow):
             # FrameGrabber detects this and skips capture automatically.
             target_hwnd = selected_window.hwnd if selected_window else None
 
+            # enable_ocr (Phase 7D): only turn it on when the user ticked
+            # the box AND actually picked a window. In "All System Audio"
+            # mode target_hwnd is None so FrameGrabber has nothing to feed
+            # the OCR loop — forcing this False avoids wasted health checks.
+            enable_ocr = self.ocr_checkbox.isChecked() and target_hwnd is not None
+
             self.live_worker = LiveWorker(
                 self.signals,
                 connection_manager=self.connection,
                 target_pid=target_pid,
                 enable_mic=enable_mic,
-                target_hwnd=target_hwnd
+                target_hwnd=target_hwnd,
+                enable_ocr=enable_ocr
             )
 
             # Hide main window, show compact bar
@@ -1231,7 +1337,10 @@ class TranscriptionOverlay(QMainWindow):
         self.compact_bar.stop_recording()
 
         # Transfer transcript from compact bar to main window's live_text
-        # so the user can see the full transcript and copy/save it
+        # so the user can see the full transcript and copy/save it.
+        # [Visual] lines also flow through here — they were stored in the
+        # compact bar by add_transcript with the "visual" source. Keep the
+        # green color so they stay visually distinct from audio lines.
         lines = self.compact_bar.get_all_transcript_lines()
         self.live_text.clear()
         for label, text in lines:
@@ -1242,6 +1351,10 @@ class TranscriptionOverlay(QMainWindow):
             elif label == "[Speaker]":
                 self.live_text.append(
                     f'<span style="color: #C0C0C0;">{label}</span> {text}'
+                )
+            elif label == "[Visual]":
+                self.live_text.append(
+                    f'<span style="color: #77DD77;">{label}</span> {text}'
                 )
             else:
                 self.live_text.append(text)
@@ -1289,6 +1402,31 @@ class TranscriptionOverlay(QMainWindow):
         fallback_note = " (fallback)" if fallback else ""
         self.model_label.setText(
             f"Model: {model}{fallback_note} | Confidence: {confidence:.0%}"
+        )
+
+    def _on_visual_text_received(self, text: str):
+        """
+        Called when the OCR drain loop returns non-empty text for a frame.
+
+        Renders the text as a [Visual] line in BOTH:
+          1. Compact bar (visible during recording)
+          2. Main window's live_text (accumulates for copy/save after stop)
+
+        Args:
+            text: Extracted text from one frame. Already stripped upstream.
+        """
+        if not text or not text.strip():
+            return
+
+        # push to the compact bar using the "visual" source label so it
+        # picks the green color and [Visual] prefix defined in add_transcript.
+        self.compact_bar.add_transcript(text, "visual")
+
+        # also append to the main window's text area for later export.
+        # matches the styling in _on_transcript_received — green for visual
+        # keeps the two paths visually consistent.
+        self.live_text.append(
+            f'<span style="color: #77DD77;">[Visual]</span> {text.strip()}'
         )
 
     # ------------------------------------------
@@ -1594,24 +1732,11 @@ class TranscriptionOverlay(QMainWindow):
             QTimer.singleShot(3000, lambda: self.server_status_label.setStyleSheet(""))
 
     # ------------------------------------------
-    # DRAGGABLE WINDOW (since no title bar)
+    # WINDOW DRAG/RESIZE — handled by native Windows title bar now.
     # ------------------------------------------
-    # Without a title bar, the user can't drag the window.
-    # We manually track mouse press → hold → move → release.
-
-    def mousePressEvent(self, event):
-        """Record where the mouse clicked (for drag calculation)."""
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.drag_position = event.globalPosition().toPoint() - self.pos()
-
-    def mouseMoveEvent(self, event):
-        """Move window to follow the mouse while dragging."""
-        if self.drag_position and event.buttons() & Qt.MouseButton.LeftButton:
-            self.move(event.globalPosition().toPoint() - self.drag_position)
-
-    def mouseReleaseEvent(self, event):
-        """Clear drag state when mouse released."""
-        self.drag_position = None
+    # No mousePressEvent / mouseMoveEvent / mouseReleaseEvent needed —
+    # the OS-provided frame takes care of dragging from the title bar
+    # and resizing from any edge. Keeping this app feel native.
 
     # ------------------------------------------
     # CLOSE EVENT — Auto-shutdown server
