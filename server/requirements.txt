@@ -10,3 +10,12 @@ python-multipart
 nemo_toolkit[asr]
 transformers
 torch
+
+# === PHASE 7D — OCR (visual pipeline) ===
+# pytesseract: Python wrapper around the Tesseract OCR binary.
+#   needs the tesseract binary on PATH — surrey_job.sh handles that
+#   via conda install -c conda-forge tesseract before uvicorn starts.
+pytesseract
+# Pillow: already a transitive dep via nemo_toolkit, but listing it
+#   explicitly so the OCR endpoint can rely on it directly.
+Pillow

@@ -864,13 +864,14 @@ class TranscriptionOverlay(QMainWindow):
         layout.setContentsMargins(0, 8, 0, 0)
 
         # =============================================
-        # WINDOW PICKER SECTION
+        # VISUAL SOURCE PICKER
         # =============================================
-        # lets the user choose which app to capture audio from.
-        # "All System Audio" = original mode (no PID filter).
-        # any other item = per-app mode (captures only that app's audio).
+        # lets the user pick a window to capture FRAMES from for OCR.
+        # audio is always system-wide — per-app audio (Phase 7A) is blocked
+        # by a Windows COM bug, documented as a known limitation.
+        # default item "None" = audio only, no on-screen text capture.
 
-        window_label = QLabel("AUDIO SOURCE")
+        window_label = QLabel("VISUAL SOURCE  (for on-screen text)")
         window_label.setObjectName("window_section_label")
         layout.addWidget(window_label)
 
@@ -879,8 +880,13 @@ class TranscriptionOverlay(QMainWindow):
 
         self.window_combo = QComboBox()
         self.window_combo.setMinimumHeight(32)
-        # first item is always "All System Audio" — the original mode
-        self.window_combo.addItem("All System Audio", None)
+        self.window_combo.setToolTip(
+            "Pick a window for OCR. Frames feed [Visual] lines into the transcript "
+            "when 'Show on-screen text' is on. Audio always comes from system."
+        )
+        # first item = no specific window. audio still works on its own,
+        # OCR is just inactive in this mode.
+        self.window_combo.addItem("None  (audio only)", None)
         picker_row.addWidget(self.window_combo, stretch=1)
 
         # refresh button — re-scans open windows
@@ -905,18 +911,18 @@ class TranscriptionOverlay(QMainWindow):
         layout.addWidget(self.mic_checkbox)
 
         # --- OCR toggle checkbox (Phase 7D) ---
-        # checked = FrameGrabber screenshots the target window every second and
+        # checked = FrameGrabber screenshots the picked window every second and
         #   Tesseract OCR pulls out any visible text. useful for slides, code
         #   editors, and chat windows where the speaker shows text but never
         #   reads it out loud.
-        # unchecked = frames are still captured in memory (cheap) but never
-        #   uploaded. good default — most users only want audio.
-        # only works when a real window is selected; disabled in "All System Audio" mode.
+        # unchecked = no frame upload. audio-only transcription.
+        # only fires when a specific window is picked above; with "None" it
+        #   stays inert.
         self.ocr_checkbox = QCheckBox("Show on-screen text")
         self.ocr_checkbox.setChecked(False)
         self.ocr_checkbox.setToolTip(
-            "Runs OCR on the selected window every second and shows extracted text "
-            "as [Visual] lines. Needs a specific window — off in 'All System Audio' mode."
+            "Runs OCR on the picked window every second and shows extracted text "
+            "as [Visual] lines in the transcript. Needs a window picked above."
         )
         layout.addWidget(self.ocr_checkbox)
 
@@ -939,9 +945,9 @@ class TranscriptionOverlay(QMainWindow):
         self.live_text.setPlaceholderText(
             "Live transcript will appear here...\n\n"
             "1. Start the server\n"
-            "2. Pick a window above (or leave on 'All System Audio')\n"
+            "2. Optional: pick a window above + tick 'Show on-screen text' for OCR\n"
             "3. Click 'Start Listening' below\n"
-            "4. Audio from the selected source will be transcribed"
+            "4. System audio will be transcribed (and any picked window will be read for [Visual] text)"
         )
         layout.addWidget(self.live_text)
 
@@ -1223,18 +1229,17 @@ class TranscriptionOverlay(QMainWindow):
 
         Called once when the live panel is built, and again each time the
         user clicks the refresh button. Keeps the first item as
-        "All System Audio" (no PID filter) and adds every real app window
-        after it.
+        "None (audio only)" — meaning no specific window picked, audio still
+        streams system-wide. Each subsequent item is a real app window.
 
         Each combo item stores a WindowInfo object as its userData.
-        "All System Audio" stores None — DualCapturer treats None as
-        system-wide mode.
+        The first item stores None — FrameGrabber treats None as no-capture.
         """
         # remember what was selected so we can re-select it if still open
         prev_data = self.window_combo.currentData()
 
         self.window_combo.clear()
-        self.window_combo.addItem("All System Audio", None)
+        self.window_combo.addItem("None  (audio only)", None)
 
         try:
             windows = list_windows()
@@ -1277,9 +1282,8 @@ class TranscriptionOverlay(QMainWindow):
             self.model_label.setText("Connecting...")
 
             # --- Read user selections from the UI ---
-            # selected_window is either None (All System Audio) or a WindowInfo object
+            # selected_window is either None (no specific window picked) or a WindowInfo object
             selected_window = self.window_combo.currentData()
-            target_pid = selected_window.pid if selected_window else None
             enable_mic = self.mic_checkbox.isChecked()
 
             # store the selected window info — Phase 7C FrameGrabber needs the HWND
@@ -1287,18 +1291,23 @@ class TranscriptionOverlay(QMainWindow):
 
             # --- Recreate LiveWorker with the selected settings ---
             # creating a fresh worker each time so the DualCapturer inside
-            # gets the correct target_pid and enable_mic for this session.
-            # reusing an old worker would keep the old PID from a previous session.
-            #
+            # gets clean state and the FrameGrabber gets the right HWND.
+
+            # target_pid is always None — per-app audio (Phase 7A) is blocked by
+            # a Windows COM activation bug. all audio flows through system-wide
+            # capture (which works perfectly). picking a window in the dropdown
+            # selects the FRAME source for OCR only, not the audio source.
+            target_pid = None
+
             # target_hwnd: passed to FrameGrabber (Phase 7C) so it knows which
-            # window to screenshot. None when "All System Audio" is selected —
+            # window to screenshot. None when nothing specific is selected —
             # FrameGrabber detects this and skips capture automatically.
             target_hwnd = selected_window.hwnd if selected_window else None
 
             # enable_ocr (Phase 7D): only turn it on when the user ticked
-            # the box AND actually picked a window. In "All System Audio"
-            # mode target_hwnd is None so FrameGrabber has nothing to feed
-            # the OCR loop — forcing this False avoids wasted health checks.
+            # the box AND picked a specific window. without an HWND there
+            # are no frames to feed the OCR loop — forcing this False avoids
+            # wasted health checks.
             enable_ocr = self.ocr_checkbox.isChecked() and target_hwnd is not None
 
             self.live_worker = LiveWorker(

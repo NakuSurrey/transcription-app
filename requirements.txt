@@ -24,3 +24,10 @@ pywin32
 # Pillow: image processing library — used by FrameGrabber (Phase 7C)
 #   to capture and resize window screenshots
 Pillow
+
+# === PHASE 7D — OCR drain loop (client side) ===
+# imagehash: perceptual-hash library. each frame is reduced to a 64-bit
+#   fingerprint; near-identical frames hash to near-identical values.
+#   used in workers.py._ocr_drain_loop to skip uploading frames that
+#   look the same as the previous one — saves bandwidth and server CPU.
+imagehash

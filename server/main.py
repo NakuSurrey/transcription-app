@@ -7,6 +7,10 @@ from fastapi.responses import JSONResponse
 import uvicorn
 from models.transcriber import TranscriptionRouter
 
+# Phase 7D — OCR endpoint lives in its own router file so main.py
+# stays focused on audio. include_router below mounts it on /vision.
+from endpoints.vision import router as vision_router
+
 # ============================================
 # CREATE THE APP
 # ============================================
@@ -37,6 +41,11 @@ async def lifespan(app):
     print("[SERVER] Shutting down, cleaning up resources")
 
 app = FastAPI(title="Transcription Server", lifespan=lifespan)
+
+# Phase 7D — mount the vision router under /vision.
+# Endpoints: POST /vision/ocr, GET /vision/health
+# Audio endpoints stay on their current paths — no conflict.
+app.include_router(vision_router, prefix="/vision", tags=["vision"])
 
 # ============================================
 # DOOR 1: WebSocket Endpoint — Live Mode

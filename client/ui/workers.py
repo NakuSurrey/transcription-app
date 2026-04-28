@@ -28,6 +28,20 @@ from audio.youtube import YouTubeExtractor
 from network.transmitter import LiveTransmitter, BulkTransmitter
 from network.connection_manager import ConnectionManager
 from video.frame_grabber import FrameGrabber
+from video.vision_transmitter import VisionTransmitter
+
+# Phase 7D — imagehash powers the perceptual-hash skip. A phash of a
+# frame is an 8x8 grid of bits derived from the low-frequency DCT of
+# the image. Two frames with near-identical content produce hashes
+# that differ by only a few bits. That lets us cheaply decide "same
+# screen as last time — no OCR needed." Import is lazy so the client
+# still runs if the dep is missing; we just lose the skip optimisation.
+try:
+    import imagehash
+    _IMAGEHASH_READY = True
+except ImportError as _imagehash_err:
+    print(f"[OCR] imagehash not installed — phash skip disabled: {_imagehash_err}")
+    _IMAGEHASH_READY = False
 
 
 # ============================================
@@ -174,7 +188,8 @@ class LiveWorker:
     """
 
     def __init__(self, signals, connection_manager=None,
-                 target_pid=None, enable_mic=True, target_hwnd=None):
+                 target_pid=None, enable_mic=True, target_hwnd=None,
+                 enable_ocr=False):
         """
         Args:
             signals: AsyncSignals object from the UI for thread-safe communication
@@ -189,6 +204,10 @@ class LiveWorker:
                 None = system-wide mode, no frame capture.
                 An integer = FrameGrabber screenshots this window every second.
                 Used by the future vision pipeline (OlmOCR / Qwen-VL).
+            enable_ocr: True = run the OCR drain loop alongside audio. Needs
+                a valid target_hwnd (otherwise FrameGrabber produces no frames).
+                False = frames are still captured but never uploaded —
+                cheaper when the user only wants audio.
         """
         self.signals = signals
         # passing target_pid and enable_mic straight through to DualCapturer.
@@ -201,8 +220,8 @@ class LiveWorker:
 
         # --- Frame Grabber (Phase 7C) ---
         # captures screenshots of the target window once per second.
-        # only active when a specific window is selected (target_hwnd is not None).
-        # in "All System Audio" mode, hwnd is None and FrameGrabber skips capture.
+        # only active when a specific window is picked (target_hwnd is not None).
+        # when no window is picked, hwnd is None and FrameGrabber skips capture.
         # frames are stored in memory as (timestamp, PIL.Image) tuples.
         self.frame_grabber = FrameGrabber(hwnd=target_hwnd)
 
@@ -211,6 +230,25 @@ class LiveWorker:
         self.transmitter = LiveTransmitter(
             status_callback=self._on_transmitter_status
         )
+
+        # --- Vision Transmitter (Phase 7D) ---
+        # uploads frames to /vision/ocr. shares the same status_callback
+        # plumbing as the audio transmitter so retry events land on the
+        # same UI signal. harmless to create even when enable_ocr is False —
+        # the drain loop just never runs.
+        self.enable_ocr = enable_ocr
+        self.vision_transmitter = VisionTransmitter(
+            status_callback=self._on_transmitter_status
+        )
+
+        # --- OCR dedup state ---
+        # _last_processed_frame_ts: stops the drain loop from re-OCRing
+        #   the same frame twice while it waits for a new one.
+        # _last_frame_hash: stores the perceptual hash of the most recently
+        #   uploaded frame. next frame is compared to this; if they look
+        #   near-identical, OCR is skipped entirely.
+        self._last_processed_frame_ts = 0.0
+        self._last_frame_hash = None
 
         self.running = False
         self.thread = None
@@ -421,6 +459,17 @@ class LiveWorker:
             await self.transmitter.disconnect()
             return
 
+        # Step 3b — start OCR drain loop in parallel (Phase 7D)
+        # runs as a sibling asyncio task, not a thread. it pulls frames
+        # that FrameGrabber already captured on its own background thread
+        # and uploads them to /vision/ocr. wrapping in a task means the
+        # audio loop below is never blocked by OCR network IO.
+        # held in a local variable so the finally block can cancel it
+        # on shutdown — otherwise the task would linger after stop().
+        ocr_task = None
+        if self.enable_ocr:
+            ocr_task = asyncio.create_task(self._ocr_drain_loop())
+
         # Step 4: Main loop — get tagged window → config → send → receive → dedupe → display
         try:
             while self.running:
@@ -508,10 +557,130 @@ class LiveWorker:
                     break
 
         finally:
-            # Clean up
+            # Clean up — cancel the OCR task first so its retry loop
+            # doesn't keep firing after the audio loop has already exited.
+            # CancelledError propagates into _ocr_drain_loop's await points
+            # and the task exits its own try/finally cleanly.
+            if ocr_task is not None and not ocr_task.done():
+                ocr_task.cancel()
+                try:
+                    await ocr_task
+                except (asyncio.CancelledError, Exception):
+                    # task may raise the CancelledError we just sent,
+                    # or an unrelated error from the last in-flight upload.
+                    # either way, shutdown continues.
+                    pass
+
             self.capturer.stop()
             await self.transmitter.disconnect()
             self.signals.connection_status.emit(False)
+
+    # ============================================
+    # OCR DRAIN LOOP — Phase 7D
+    # ============================================
+    # Runs as an asyncio task alongside the audio loop. Once a second:
+    #   1. ask FrameGrabber for its newest captured frame
+    #   2. skip if it's the same frame we already processed (timestamp)
+    #   3. skip if the screen looks the same as last time (phash diff)
+    #   4. otherwise upload to /vision/ocr and emit the text
+    #
+    # Errors are swallowed and logged — OCR going wrong should never
+    # take down the audio pipeline. Worst case the loop sits idle and
+    # the user sees no [Visual] lines.
+
+    async def _ocr_drain_loop(self):
+        """Pull frames at 1Hz, skip duplicates, upload for OCR, emit text."""
+
+        # Step 1 — confirm the server actually has tesseract installed.
+        # if /vision/health says "unavailable", uploading is wasted work.
+        # bail out cleanly so the audio loop has the bandwidth to itself.
+        try:
+            ocr_available = await self.vision_transmitter.check_vision_available()
+        except Exception as e:
+            print(f"[OCR] health check failed: {e} — drain loop disabled")
+            return
+
+        if not ocr_available:
+            print("[OCR] server reports tesseract unavailable — drain loop disabled")
+            return
+
+        print("[OCR] drain loop started — uploading 1 frame/sec when screen changes")
+
+        # phash difference threshold — anything under this counts as
+        # "same screen". phash returns a 64-bit hash; the difference is
+        # the Hamming distance. Empirically:
+        #   0   → byte-identical frames (rare under PrintWindow)
+        #   1-5 → cursor moved / clock ticked / minor anti-alias jitter
+        #   6+  → real visible change (text scrolled, slide flipped)
+        # set conservative at 5 so we err toward fewer uploads.
+        PHASH_SKIP_THRESHOLD = 5
+
+        try:
+            while self.running:
+                # Step 2 — pull the newest frame, if any
+                frames = self.frame_grabber.get_frames()
+                if not frames:
+                    # FrameGrabber hasn't captured anything yet (or hwnd
+                    # was None). wait a beat and try again.
+                    await asyncio.sleep(1.0)
+                    continue
+
+                timestamp, image = frames[-1]
+
+                # Step 3 — skip frames we already processed.
+                # FrameGrabber appends new frames every second; if our
+                # loop wakes up before a new one is ready, we'd otherwise
+                # re-OCR the same frame.
+                if timestamp <= self._last_processed_frame_ts:
+                    await asyncio.sleep(1.0)
+                    continue
+                self._last_processed_frame_ts = timestamp
+
+                # Step 4 — perceptual hash skip (only if imagehash is installed).
+                # cheap CPU op (~1-2 ms on a 1920px image) compared to a
+                # ~200 ms server round-trip, so worth doing locally.
+                if _IMAGEHASH_READY:
+                    try:
+                        current_hash = imagehash.phash(image)
+                        if self._last_frame_hash is not None:
+                            diff = current_hash - self._last_frame_hash
+                            if diff <= PHASH_SKIP_THRESHOLD:
+                                # screen looks the same — skip OCR entirely
+                                await asyncio.sleep(1.0)
+                                continue
+                        self._last_frame_hash = current_hash
+                    except Exception as e:
+                        # phash errored — fall through and OCR anyway.
+                        # better to spend the upload than lose a frame.
+                        print(f"[OCR] phash failed (non-fatal): {e}")
+
+                # Step 5 — upload and emit
+                try:
+                    text = await self.vision_transmitter.upload_frame(image)
+                    if text and text.strip():
+                        # only fire the signal when there's real text.
+                        # blank frames produce empty strings — no point
+                        # cluttering the UI with "[Visual] (empty)".
+                        self.signals.visual_text_received.emit(text)
+                except Exception as e:
+                    # upload failed after retries — log and move on.
+                    # next frame is at most a second away; worth more
+                    # than blocking the loop on a stubborn failure.
+                    print(f"[OCR] upload failed (non-fatal): {e}")
+
+                # pace the loop — FrameGrabber captures at 1 Hz, so
+                # there's no point checking faster than that.
+                await asyncio.sleep(1.0)
+
+        except asyncio.CancelledError:
+            # expected on stop() — propagate so the awaiting task in
+            # _async_pipeline's finally block sees the cancellation.
+            print("[OCR] drain loop cancelled")
+            raise
+        except Exception as e:
+            # any unexpected crash here MUST NOT kill the audio loop.
+            # log loudly and exit the OCR task only.
+            print(f"[OCR] drain loop crashed (audio unaffected): {e}")
 
 
 # ============================================

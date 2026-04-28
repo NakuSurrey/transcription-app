@@ -149,9 +149,8 @@ class FrameGrabber:
         """
         Begin capturing frames in a background thread.
 
-        If hwnd is None (user picked "All System Audio"), capture
-        is skipped entirely. There is no single window to screenshot
-        in system-wide mode.
+        If hwnd is None (user picked "None — audio only"), capture
+        is skipped entirely. There is no single window to screenshot.
         """
         if self._running:
             return
