@@ -190,17 +190,26 @@ class VisionTransmitter:
         can decide whether to fire frames at all. Saves wasted
         uploads when the server has no Tesseract installed.
         """
+        # diagnostic prints below are noisy on purpose — on the rare
+        # path where the client says "unavailable" but a manual curl
+        # says "ready", these tell us exactly which branch fired.
+        # cheap to keep — runs once per session, four prints max.
+        print(f"[VISION] checking health at {self.health_url}")
         try:
             timeout = aiohttp.ClientTimeout(total=5)
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.get(self.health_url) as resp:
+                    print(f"[VISION] health HTTP status = {resp.status}")
                     if resp.status != 200:
                         return False
                     data = await resp.json()
-                    return data.get("status") == "ready"
-        except Exception:
+                    status_value = data.get("status")
+                    print(f"[VISION] health body = {data}")
+                    return status_value == "ready"
+        except Exception as e:
             # any failure here = not available. do not raise — the
             # audio pipeline should still run even if OCR is dead.
+            print(f"[VISION] health check raised: {type(e).__name__}: {e}")
             return False
 
     # ------------------------------------------

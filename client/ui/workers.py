@@ -428,6 +428,19 @@ class LiveWorker:
             # task.cancel() injects CancelledError into the await, which
             # propagates up to here. We catch it silently.
             pass
+        except RuntimeError as e:
+            # "Event loop stopped before Future completed." is the
+            # cosmetic noise asyncio raises when stop() interrupts an
+            # asyncio.to_thread executor future before it resolves.
+            # the audio queue wait gets cancelled mid-flight on Stop —
+            # nothing actually broke, the user just saw a red error
+            # on the UI for a clean shutdown. silence only this exact
+            # shape; any other RuntimeError still surfaces normally.
+            msg = str(e)
+            if "Event loop stopped" in msg or "Future" in msg:
+                pass  # known shutdown race, harmless
+            else:
+                self.signals.error.emit(f"Live pipeline error: {e}")
         except Exception as e:
             self.signals.error.emit(f"Live pipeline error: {e}")
         finally:
@@ -475,7 +488,17 @@ class LiveWorker:
             while self.running:
                 # Get next tagged audio window from DualCapturer
                 # Returns (wav_bytes, "speaker") or (wav_bytes, "mic") or None
-                item = self.capturer.get_chunk(timeout=0.5)
+                #
+                # to_thread runs the synchronous queue wait on a worker
+                # thread so the asyncio event loop stays free. without
+                # this, the OCR drain loop's HTTP requests time out
+                # because the event loop is held captive in get_chunk
+                # for 0.5s every iteration. the cosmetic shutdown error
+                # ("Event loop stopped before Future completed") that
+                # came with this approach is silenced in _run_pipeline
+                # via a specific RuntimeError catch — see the catch
+                # block in that function.
+                item = await asyncio.to_thread(self.capturer.get_chunk, 0.5)
 
                 if item is None:
                     # No speech detected from either source — keep waiting

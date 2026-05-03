@@ -1368,8 +1368,31 @@ class TranscriptionOverlay(QMainWindow):
             else:
                 self.live_text.append(text)
 
-        # Show main window
+        # Show main window AND force it to the front. running this chain
+        # directly here was racing with live_worker.stop() teardown events
+        # still draining in the Qt event queue — sometimes the window came
+        # forward, sometimes it stayed buried behind whatever had focus.
+        # deferring to the next event loop tick via QTimer.singleShot(0, ...)
+        # lets all pending stop events drain first, then the show chain
+        # runs cleanly on a quiet event loop.
+        QTimer.singleShot(0, self._restore_window_to_front)
+
+    def _restore_window_to_front(self):
+        """
+        Bring the main window forward after a Stop. Called on the next
+        event loop tick by _stop_live so pending teardown events finish
+        first. Standard PyQt6 sequence — show() un-hides, setWindowState
+        clears the minimized flag and marks active, raise_() pulls to
+        the top of z-order, activateWindow() grabs keyboard focus. Qt
+        is imported up top so the WindowState flag is in scope.
+        """
         self.show()
+        self.setWindowState(
+            self.windowState() & ~Qt.WindowState.WindowMinimized
+            | Qt.WindowState.WindowActive
+        )
+        self.raise_()
+        self.activateWindow()
 
     def _on_compact_stop(self):
         """
