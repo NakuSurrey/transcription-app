@@ -84,3 +84,4 @@ PLAN*.md
 # — all local-only, never pushed to GitHub
 # ============================================
 docs/
+test.srt

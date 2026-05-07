@@ -1045,6 +1045,9 @@ class TranscriptionOverlay(QMainWindow):
         self.signals.bulk_complete.connect(self._on_bulk_complete)
         self.signals.server_status.connect(self._on_server_status)
         self.signals.error.connect(self._on_error)
+        # auto-check guard — bulk mode and listen are blocked until first check passes
+        self._server_verified = False
+        self._bulk_in_flight = False
         self.signals.download_progress.connect(self._on_download_progress)
         self.signals.connection_event.connect(self._on_connection_event)
         # Phase 7D — OCR drain loop emits this from workers.py whenever a
@@ -1275,6 +1278,11 @@ class TranscriptionOverlay(QMainWindow):
         Can also be called directly if user clicks "Stop Listening" in main window.
         """
         if not self.is_live:
+            # block start if the server isn't verified — same gate as bulk mode
+            if not getattr(self, "_server_verified", False):
+                self._on_error("Server not connected — wait for auto-check or click Check Connection")
+                return
+
             # --- START RECORDING ---
             self.is_live = True
             self.listen_btn.setText("Stop Listening")
@@ -1472,20 +1480,53 @@ class TranscriptionOverlay(QMainWindow):
             self._on_error("Please paste a YouTube URL")
             return
 
-        self.download_btn.setEnabled(False)
-        self.download_btn.setText("Working...")
+        # block the run if the server isn't reachable — saves yt-dlp burn on a doomed pipeline
+        if not getattr(self, "_server_verified", False):
+            self._on_error("Server not connected — wait for auto-check or click Check Connection")
+            return
+
+        # flip Transcribe button into Cancel role while running
+        self.download_btn.clicked.disconnect()
+        self.download_btn.clicked.connect(self._cancel_bulk)
+        self.download_btn.setText("Cancel")
+        self.download_btn.setEnabled(True)
+
         self.bulk_status.setText("Downloading audio...")
-        self.bulk_text.clear()
-        # Start the bulk pipeline: yt-dlp download → HTTP POST → transcript back
+        # last successful transcript stays visible until the new one replaces it atomically
+        self._bulk_in_flight = True
+
+        # kick off the pipeline: yt-dlp download → HTTP POST → transcript back
         self.bulk_worker.start(url)
+
+    def _cancel_bulk(self):
+        """User clicked Cancel while a bulk job was running."""
+        # tell the worker to stop — the pipeline checks self.running between steps
+        self.bulk_worker.stop()
+        self.bulk_status.setText("Cancelled")
+        self.bulk_status.setStyleSheet("color: #FFB347;")
+        QTimer.singleShot(3000, lambda: self.bulk_status.setStyleSheet(""))
+        self._reset_bulk_button()
+        self._bulk_in_flight = False
+
+    def _reset_bulk_button(self):
+        """Put the download button back into Transcribe mode."""
+        try:
+            self.download_btn.clicked.disconnect()
+        except TypeError:
+            # nothing was connected — safe to ignore
+            pass
+        self.download_btn.clicked.connect(self._start_bulk_transcription)
+        self.download_btn.setText("Transcribe")
+        self.download_btn.setEnabled(True)
 
     def _on_bulk_complete(self, transcript: str):
         """Called when bulk transcription finishes."""
         self.current_transcript = transcript
+        # atomic replace — no flash of empty area between failures
         self.bulk_text.setText(transcript)
         self.bulk_status.setText("Transcription complete")
-        self.download_btn.setEnabled(True)
-        self.download_btn.setText("Transcribe")
+        self._reset_bulk_button()
+        self._bulk_in_flight = False
 
     def _on_download_progress(self, percent: float, status: str):
         """Update progress during YouTube download."""
@@ -1656,6 +1697,8 @@ class TranscriptionOverlay(QMainWindow):
 
     def _on_server_status(self, status: str):
         """Update server status display and button state."""
+        # mark the verified flag so bulk + listen know if the server is real
+        self._server_verified = (status == "online")
         if status == "online":
             if self.connection.is_hpc_mode():
                 # HPC mode: server is reachable through tunnel
@@ -1840,6 +1883,10 @@ def run_app():
     # Create and show the overlay
     window = TranscriptionOverlay()
     window.show()
+
+    # auto-check the server connection right after the window paints — gives the user
+    # a real "is the tunnel up?" answer instead of a fake green label.
+    QTimer.singleShot(300, window._toggle_server)
 
     sys.exit(app.exec())
 

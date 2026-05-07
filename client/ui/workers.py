@@ -813,11 +813,20 @@ class BulkWorker:
         if not self.running:
             return  # Cancelled
 
+        # check cancel flag before burning network on a doomed upload
+        if not self.running:
+            print("[BULK] Cancelled before upload")
+            return
+
         # Step 3: Upload to server for transcription
         self.signals.download_progress.emit(100.0, "Uploading to server")
         try:
             result = await self.transmitter.upload_file(filepath)
             transcript = result.get("transcript", "No transcript returned")
+            # final guard — if user cancelled while upload was in-flight, drop the result
+            if not self.running:
+                print("[BULK] Cancelled during upload — dropping result")
+                return
             self.signals.bulk_complete.emit(transcript)
         except Exception as e:
             self.signals.error.emit(f"Transcription failed: {e}")
