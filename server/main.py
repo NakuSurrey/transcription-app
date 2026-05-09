@@ -10,6 +10,11 @@ from models.transcriber import TranscriptionRouter
 # Phase 7D — OCR endpoint lives in its own router file so main.py
 # stays focused on audio. include_router below mounts it on /vision.
 from endpoints.vision import router as vision_router
+from endpoints.vision_v2 import router as vision_v2_router, set_model as set_olmocr_model
+from models.vision_olmocr import OlmOCRModel
+
+# OlmOCR-2 model handle — loaded inside the lifespan startup hook below.
+olmocr = OlmOCRModel()
 
 # ============================================
 # CREATE THE APP
@@ -36,6 +41,8 @@ router = TranscriptionRouter()
 async def lifespan(app):
     # --- STARTUP: runs when server boots ---
     router.load_models()
+    olmocr.load()
+    set_olmocr_model(olmocr)
     yield
     # --- SHUTDOWN: runs when server stops ---
     print("[SERVER] Shutting down, cleaning up resources")
@@ -46,6 +53,7 @@ app = FastAPI(title="Transcription Server", lifespan=lifespan)
 # Endpoints: POST /vision/ocr, GET /vision/health
 # Audio endpoints stay on their current paths — no conflict.
 app.include_router(vision_router, prefix="/vision", tags=["vision"])
+app.include_router(vision_v2_router, prefix="/vision_v2", tags=["vision_v2"])
 
 # ============================================
 # DOOR 1: WebSocket Endpoint — Live Mode

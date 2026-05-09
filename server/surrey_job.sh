@@ -18,11 +18,11 @@
 # Names your job in the queue. When you run squeue, you'll see this name
 # instead of a generic ID. Makes it easy to identify your job.
 
-#SBATCH --partition=gpu
+#SBATCH --partition=gpu_risk
 # Which group of machines to run on. "gpu" = the partition that has
 # NVIDIA A100 GPUs. The cluster also has CPU-only partitions — we skip those.
 
-#SBATCH --gres=gpu:3g.40gb:1
+#SBATCH --gres=gpu:l40s:1
 # gres = Generic RESource. gpu:3g.40gb:1 = "I need 1 MIG slice with 3 compute
 # units and ~40 GiB VRAM." The cluster splits physical A100 80GB GPUs into
 # MIG (Multi-Instance GPU) slices. Available types:
@@ -114,6 +114,11 @@ echo "[INFO] Working directory: $(pwd)"
 # GPU node (~888 GB free, 1% used). plenty of room for the unpack and
 # anything else NeMo or PyTorch caches during a session.
 export TMPDIR="/scratch/${USER}/${SLURM_JOB_ID}"
+
+# HF model cache on /parallel_scratch — home filesystem too small for OlmOCR-2 + DeepSeek
+export HF_HOME=/parallel_scratch/${USER}/hf_cache
+export HUGGINGFACE_HUB_CACHE=/parallel_scratch/${USER}/hf_cache/hub
+mkdir -p "$HUGGINGFACE_HUB_CACHE"
 mkdir -p "$TMPDIR"
 # clean the dir up when the job exits — /scratch persists between jobs
 # unless we explicitly delete, so the trap stops old per-job folders from
